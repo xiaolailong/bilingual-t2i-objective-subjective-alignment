@@ -1,0 +1,31 @@
+# Python dependencies for the reproducibility scripts.
+#
+# These core packages are sufficient for data preparation, Excel merging,
+# metadata extraction, resource logging, and ComfyUI-based image-generation
+# control scripts. The seven objective metrics were run in separate conda
+# environments because their deep-learning dependencies are not fully compatible.
+# See README.md for the environment-level description.
+
+pandas>=2.0
+openpyxl>=3.1
+Pillow>=10.0
+requests>=2.31
+psutil>=5.9
+
+# Optional metric-specific packages.
+# Install these only inside the corresponding metric conda environments and
+# according to the package/model documentation and local CUDA/PyTorch setup.
+#
+# torch
+# torchvision
+# transformers
+# open_clip_torch
+# cn_clip
+# pyiqa
+# ImageReward
+# hpsv2
+# t2v-metrics
+
+# R analysis dependencies are not installed from this file. The R scripts use:
+# readxl, dplyr, stringr, purrr, tidyr, lme4, openxlsx, tibble,
+# ggplot2, writexl, scales, patchwork, and forcats.

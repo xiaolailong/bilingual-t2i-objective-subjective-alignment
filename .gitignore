@@ -1,0 +1,8 @@
+__pycache__/
+.Rhistory
+.RData
+*.log
+*.tmp
+models/
+data/
+*.zip

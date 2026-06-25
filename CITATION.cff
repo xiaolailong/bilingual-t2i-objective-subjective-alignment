@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the associated manuscript and the archived data record."
+title: "Code for: Alignment between Objective Metrics and Subjective Scores for AI-Generated Images under Bilingual Prompts"
+type: software
+authors:
+  - family-names: "Chen"
+    given-names: "Lianglong"
+version: "1.0.0"
