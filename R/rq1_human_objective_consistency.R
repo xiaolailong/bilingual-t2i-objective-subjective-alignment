@@ -767,15 +767,22 @@ top_global_pairs <- correlation_long %>%
 # -----------------------------
 # 9. Figures
 # -----------------------------
-plot_theme <- theme_minimal(base_size = 12) +
+plot_theme <- theme_minimal(base_size = 10, base_family = "serif") +
   theme(
-    panel.grid.minor = element_blank(),
-    panel.grid.major = element_line(color = "#E6E6E6", linewidth = 0.25),
-    axis.text.x = element_text(angle = 35, hjust = 1),
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "#333333", linewidth = 0.25),
+    axis.ticks = element_line(color = "#333333", linewidth = 0.25),
+    axis.text.x = element_text(angle = 30, hjust = 1, size = 8.5),
+    axis.text.y = element_text(size = 8.5),
     axis.text = element_text(color = "#333333"),
-    plot.title = element_text(face = "bold"),
-    legend.title = element_text(face = "bold"),
-    legend.position = "right"
+    axis.title = element_text(size = 9.5),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 10.5, margin = margin(b = 6)),
+    plot.subtitle = element_text(hjust = 0.5, size = 9),
+    plot.title.position = "plot",
+    legend.title = element_text(face = "bold", size = 8.5),
+    legend.text = element_text(size = 8),
+    legend.position = "right",
+    strip.text = element_text(face = "bold", size = 8.5)
   )
 
 # Publication-style palettes used only for figure aesthetics.
@@ -789,17 +796,21 @@ metric_point_palette <- c(
   "VQAScore" = "#000000"
 )
 r2_palette <- c(
-  "Full-sample R2" = "#4C78A8",
-  "Image-level CV R2" = "#F58518",
-  "PromptID-grouped CV R2" = "#54A24B"
+  "Full-sample R²" = "#4C78A8",
+  "Image-level CV R²" = "#F58518",
+  "PromptID-grouped CV R²" = "#54A24B"
 )
 
 save_plot <- function(plot, filename_stem, width, height) {
+  # JEI manuscript text area is 6.5 in. wide by 9 in. high; cap exported figures accordingly.
+  width <- min(width, 6.5)
+  height <- min(height, 9)
   ggsave(
     filename = file.path(figure_dir, paste0(filename_stem, ".png")),
     plot = plot,
     width = width,
     height = height,
+    units = "in",
     dpi = 300,
     bg = "white"
   )
@@ -808,6 +819,7 @@ save_plot <- function(plot, filename_stem, width, height) {
     plot = plot,
     width = width,
     height = height,
+    units = "in",
     bg = "white"
   )
 }
@@ -833,19 +845,19 @@ spearman_for_plot <- correlation_long %>%
 
 heatmap_plot <- ggplot(spearman_for_plot, aes(x = HumanDimensionLabel, y = ObjectiveMetricLabel, fill = Correlation)) +
   geom_tile(color = "white", linewidth = 0.5) +
-  geom_text(aes(label = sprintf("%.2f", Correlation)), size = 3.5) +
+  geom_text(aes(label = sprintf("%.2f", Correlation)), size = 2.8) +
   scale_fill_gradient2(
     low = "#3B6FB6", mid = "white", high = "#B6403A",
-    midpoint = 0, limits = c(-1, 1), name = "Spearman rho"
+    midpoint = 0, limits = c(-1, 1), name = "Spearman's rho"
   ) +
   labs(
-    title = "Subjective-objective Spearman alignment",
-    x = "Subjective assessment dimension",
+    title = "Subjective–objective Spearman alignment",
+    x = "Subjective assessment",
     y = "Objective metric"
   ) +
   plot_theme
 
-save_plot(heatmap_plot, "rq1_spearman_correlation_heatmap", width = 9, height = 5.5)
+save_plot(heatmap_plot, "rq1_spearman_correlation_heatmap", width = 6.5, height = 4.1)
 
 # 9.2 Top-K overlap heatmap: direct ranking consistency between objective and human top-ranked images.
 topk_plot_df <- topk_overlap %>%
@@ -858,18 +870,121 @@ topk_plot_df <- topk_overlap %>%
 
 topk_heatmap <- ggplot(topk_plot_df, aes(x = HumanDimensionLabel, y = ObjectiveMetricLabel, fill = OverlapRate)) +
   geom_tile(color = "white", linewidth = 0.5) +
-  geom_text(aes(label = CountLabel), size = 3.2) +
+  geom_text(aes(label = CountLabel), size = 2.4) +
   facet_wrap(~ KLabel, nrow = 1) +
   scale_fill_gradient(low = "white", high = "#3B6FB6", limits = c(0, 1), labels = scales::percent, name = "Overlap rate") +
   labs(
-    title = "Top-K overlap between objective-metric and subjective rankings",
-    x = "Subjective assessment dimension",
+    title = "Top-K overlap with subjective rankings",
+    x = "Subjective assessment",
     y = "Objective metric"
   ) +
   plot_theme +
   theme(axis.text.x = element_text(angle = 35, hjust = 1))
 
-save_plot(topk_heatmap, "rq1_topk_overlap_heatmap", width = 13, height = 5.5)
+save_plot(topk_heatmap, "rq1_topk_overlap_heatmap", width = 6.5, height = 4.8)
+
+
+# 9.2a Manuscript-oriented Top-K overlap summary figure.
+# Panel (a) shows the Top-30 overlap matrix with objective metrics on the x-axis.
+# Panel (b) summarizes mean Top-K overlap rates across the four subjective assessments.
+top30_heatmap_df <- topk_overlap %>%
+  filter(K == 30) %>%
+  mutate(
+    ObjectiveMetricLabel = factor(ObjectiveMetricLabel, levels = unname(metric_labels[objective_vars])),
+    HumanDimensionLabel = factor(HumanDimensionLabel, levels = unname(human_labels[human_vars])),
+    CountLabel = as.character(OverlapCount)
+  )
+
+topk_mean_overlap <- topk_overlap %>%
+  group_by(ObjectiveMetric, ObjectiveMetricLabel, K) %>%
+  summarise(
+    MeanOverlapRate = mean(OverlapRate, na.rm = TRUE),
+    MeanOverlapCount = mean(OverlapCount, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ObjectiveMetricLabel = factor(ObjectiveMetricLabel, levels = unname(metric_labels[objective_vars])),
+    KLabel = factor(paste0("Top ", K), levels = paste0("Top ", c(10, 20, 30)))
+  )
+
+top30_overlap_panel <- ggplot(
+  top30_heatmap_df,
+  aes(x = ObjectiveMetricLabel, y = HumanDimensionLabel, fill = OverlapRate)
+) +
+  geom_tile(color = "white", linewidth = 0.45) +
+  geom_text(aes(label = CountLabel), size = 2.8) +
+  scale_fill_gradient(
+    low = "white",
+    high = "#3B6FB6",
+    limits = c(0, 0.50),
+    labels = scales::percent_format(accuracy = 1),
+    name = "Overlap rate"
+  ) +
+  labs(
+    title = "(a) Top-30 overlap by subjective assessment",
+    x = "Objective metric",
+    y = "Subjective assessment"
+  ) +
+  plot_theme +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0, size = 9.5, margin = margin(b = 4)),
+    axis.text.x = element_text(angle = 30, hjust = 1, size = 7.8),
+    axis.text.y = element_text(size = 8.0),
+    axis.title = element_text(size = 9.0),
+    legend.title = element_text(face = "bold", size = 7.5),
+    legend.text = element_text(size = 7.0),
+    legend.key.height = unit(12, "pt"),
+    legend.key.width = unit(7, "pt"),
+    legend.position = "right"
+  )
+
+topk_mean_overlap_panel <- ggplot(
+  topk_mean_overlap,
+  aes(x = ObjectiveMetricLabel, y = MeanOverlapRate, color = KLabel, shape = KLabel, group = KLabel)
+) +
+  geom_line(linewidth = 0.45, alpha = 0.75) +
+  geom_point(size = 2.2) +
+  scale_color_manual(values = c("Top 10" = "#7A7A7A", "Top 20" = "#4C78A8", "Top 30" = "#B6403A"), name = "Top-K level") +
+  scale_shape_manual(values = c("Top 10" = 16, "Top 20" = 17, "Top 30" = 15), name = "Top-K level") +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, max(0.50, max(topk_mean_overlap$MeanOverlapRate, na.rm = TRUE) + 0.04)),
+    expand = expansion(mult = c(0.02, 0.08))
+  ) +
+  labs(
+    title = "(b) Mean Top-K overlap rate",
+    x = "Objective metric",
+    y = "Mean overlap rate"
+  ) +
+  plot_theme +
+  guides(
+    color = guide_legend(nrow = 1, byrow = TRUE),
+    shape = guide_legend(nrow = 1, byrow = TRUE)
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0, size = 9.5, margin = margin(b = 4)),
+    axis.text.x = element_text(angle = 30, hjust = 1, size = 7.8),
+    axis.text.y = element_text(size = 8.0),
+    axis.title = element_text(size = 9.0),
+    legend.position = "top",
+    legend.justification = "right",
+    legend.box.just = "right",
+    legend.title = element_text(face = "bold", size = 7.5),
+    legend.text = element_text(size = 7.0),
+    legend.margin = margin(0, 0, 0, 0)
+  )
+
+topk_summary_figure <- top30_overlap_panel / topk_mean_overlap_panel +
+  plot_layout(heights = c(1.05, 1.0)) +
+  plot_annotation(
+    title = "Top-K ranking overlap with subjective scores",
+    theme = theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 10.5, margin = margin(b = 5)),
+      plot.title.position = "plot"
+    )
+  )
+
+save_plot(topk_summary_figure, "rq1_topk_overlap_summary_figure", width = 6.5, height = 5.8)
 
 # 9.2b Main combined agreement figure for the manuscript body.
 # It combines the Spearman heatmap and the Top-K overlap heatmap into a single two-panel figure.
@@ -881,18 +996,19 @@ topk_panel <- topk_heatmap +
   labs(title = NULL) +
   theme(legend.position = "right")
 
-main_agreement_figure <- heatmap_panel + topk_panel +
-  plot_layout(widths = c(1.0, 1.45), guides = "collect") +
+main_agreement_figure <- (heatmap_panel / topk_panel) +
+  plot_layout(heights = c(1.0, 1.25), guides = "collect") +
   plot_annotation(
-    title = "Subjective-objective alignment of image assessment metrics",
+    title = "Subjective–objective alignment of metrics",
     tag_levels = "a"
   ) &
   theme(
-    plot.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 10.5),
+    plot.title.position = "plot",
     legend.position = "right"
   )
 
-save_plot(main_agreement_figure, "rq1_main_alignment_figure", width = 18, height = 5.8)
+save_plot(main_agreement_figure, "rq1_main_alignment_figure", width = 6.5, height = 7.0)
 
 # 9.3 Faceted scatter plot: top 3 metrics against the composite subjective score.
 # This figure helps inspect whether the strongest composite-score associations are smooth,
@@ -932,20 +1048,24 @@ if (nrow(top_composite_metrics) > 0) {
       size = 3.5
     ) +
     labs(
-      title = "Objective metrics associated with subjective composite score",
+      title = "Top composite-score associations",
       x = "Objective metric value",
-      y = "subjective composite score"
+      y = "Subjective composite score"
     ) +
-    theme_minimal(base_size = 12) +
+    theme_minimal(base_size = 10, base_family = "serif") +
     theme(
-      panel.grid.minor = element_blank(),
-      plot.title = element_text(face = "bold")
+      panel.grid = element_blank(),
+      axis.line = element_line(color = "#333333", linewidth = 0.25),
+      axis.ticks = element_line(color = "#333333", linewidth = 0.25),
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 10.5),
+      plot.title.position = "plot",
+      strip.text = element_text(face = "bold", size = 8.5)
     )
 
-  save_plot(scatter_composite_plot, "rq1_top3_composite_scatter", width = 11, height = 4)
+  save_plot(scatter_composite_plot, "rq1_top3_composite_scatter", width = 6.5, height = 3.6)
 }
 
-# 9.4 Prediction heatmap: single-metric R-squared.
+# 9.4 Prediction heatmap: single-metric R^2.
 # This figure complements the correlation heatmap by showing single-metric explanatory strength.
 prediction_heatmap_df <- univariate_prediction %>%
   mutate(
@@ -955,46 +1075,46 @@ prediction_heatmap_df <- univariate_prediction %>%
 
 prediction_heatmap <- ggplot(prediction_heatmap_df, aes(x = HumanDimensionLabel, y = ObjectiveMetricLabel, fill = R2)) +
   geom_tile(color = "white", linewidth = 0.5) +
-  geom_text(aes(label = sprintf("%.2f", R2)), size = 3.5) +
-  scale_fill_gradient(low = "white", high = "#B6403A", name = "R-squared") +
+  geom_text(aes(label = sprintf("%.2f", R2)), size = 2.8) +
+  scale_fill_gradient(low = "white", high = "#B6403A", name = "R²") +
   labs(
-    title = "Single-metric predictive association with subjective scores",
-    x = "Subjective assessment dimension",
+    title = "Single-metric R² for subjective scores",
+    x = "Subjective assessment",
     y = "Objective metric"
   ) +
   plot_theme
 
-save_plot(prediction_heatmap, "rq1_univariate_prediction_r2_heatmap", width = 9, height = 5.5)
+save_plot(prediction_heatmap, "rq1_univariate_prediction_r2_heatmap", width = 6.5, height = 4.1)
 
-# 9.5 Combined-model R2 comparison: full-sample fit, image-level CV,
+# 9.5 Combined-model R^2 comparison: full-sample fit, image-level CV,
 # and PromptID-grouped CV robustness check.
 combined_r2_plot_df <- bind_rows(
   combined_prediction_summary %>%
     transmute(
       HumanDimension,
       HumanDimensionLabel,
-      EstimateType = "Full-sample R2",
+      EstimateType = "Full-sample R²",
       R2 = R2
     ),
   combined_prediction_cv %>%
     transmute(
       HumanDimension,
       HumanDimensionLabel,
-      EstimateType = "Image-level CV R2",
+      EstimateType = "Image-level CV R²",
       R2 = CV_R2_Mean
     ),
   combined_prediction_prompt_grouped_cv %>%
     transmute(
       HumanDimension,
       HumanDimensionLabel,
-      EstimateType = "PromptID-grouped CV R2",
+      EstimateType = "PromptID-grouped CV R²",
       R2 = CV_R2_Mean
     )
 ) %>%
   mutate(
     EstimateType = factor(
       EstimateType,
-      levels = c("Full-sample R2", "Image-level CV R2", "PromptID-grouped CV R2")
+      levels = c("Full-sample R²", "Image-level CV R²", "PromptID-grouped CV R²")
     ),
     HumanDimensionLabel = factor(HumanDimensionLabel, levels = unname(human_labels[human_vars]))
   )
@@ -1005,26 +1125,34 @@ combined_r2_plot <- ggplot(combined_r2_plot_df, aes(x = HumanDimensionLabel, y =
     aes(label = sprintf("%.2f", R2)),
     position = position_dodge(width = 0.8),
     vjust = -0.3,
-    size = 3.1
+    size = 2.6
   ) +
   scale_y_continuous(limits = c(0, max(0.85, max(combined_r2_plot_df$R2, na.rm = TRUE) + 0.08))) +
   scale_fill_manual(values = r2_palette) +
   labs(
-    title = "Combined seven-metric prediction of subjective scores",
-    subtitle = "PromptID-grouped CV evaluates unseen prompt-level conditions",
-    x = "Subjective assessment dimension",
-    y = "R-squared",
+    title = "Seven-metric prediction of subjective scores",
+    subtitle = "PromptID-grouped CV for unseen prompts",
+    x = "Subjective assessment",
+    y = "R²",
     fill = NULL
   ) +
-  theme_minimal(base_size = 12) +
+  theme_minimal(base_size = 10, base_family = "serif") +
   theme(
-    panel.grid.minor = element_blank(),
-    axis.text.x = element_text(angle = 25, hjust = 1),
-    plot.title = element_text(face = "bold"),
-    legend.position = "top"
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "#333333", linewidth = 0.25),
+    axis.ticks = element_line(color = "#333333", linewidth = 0.25),
+    axis.text.x = element_text(angle = 25, hjust = 1, size = 8.5),
+    axis.text.y = element_text(size = 8.5),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 10.5),
+    plot.subtitle = element_text(hjust = 0.5, size = 9),
+    plot.title.position = "plot",
+    legend.position = "top",
+    legend.justification = "right",
+    legend.box.just = "right",
+    legend.text = element_text(size = 8)
   )
 
-save_plot(combined_r2_plot, "rq1_combined_model_r2_comparison", width = 11, height = 5.3)
+save_plot(combined_r2_plot, "rq1_combined_model_r2_comparison", width = 6.5, height = 4.2)
 
 # -----------------------------
 # 10. Paper-ready tables
@@ -1091,19 +1219,19 @@ paper_table_combined_prediction <- combined_prediction_summary %>%
     PromptGrouped_CV_RMSE_SD = round(PromptGrouped_CV_RMSE_SD, 3)
   ) %>%
   select(
-    `Subjective dimension` = HumanDimensionLabel,
+    `Subjective assessment` = HumanDimensionLabel,
     N,
-    `Full-sample R2` = R2,
-    `Adjusted R2` = AdjR2,
+    `Full-sample R^2` = R2,
+    `Adjusted R^2` = AdjR2,
     `Full-sample RMSE` = RMSE,
     `Image-level CV setting`,
-    `Image-level CV R2 mean` = ImageLevel_CV_R2_Mean,
-    `Image-level CV R2 SD` = ImageLevel_CV_R2_SD,
+    `Image-level CV R^2 mean` = ImageLevel_CV_R2_Mean,
+    `Image-level CV R^2 SD` = ImageLevel_CV_R2_SD,
     `Image-level CV RMSE mean` = ImageLevel_CV_RMSE_Mean,
     `Image-level CV RMSE SD` = ImageLevel_CV_RMSE_SD,
     `Prompt-grouped CV setting`,
-    `Prompt-grouped CV R2 mean` = PromptGrouped_CV_R2_Mean,
-    `Prompt-grouped CV R2 SD` = PromptGrouped_CV_R2_SD,
+    `Prompt-grouped CV R^2 mean` = PromptGrouped_CV_R2_Mean,
+    `Prompt-grouped CV R^2 SD` = PromptGrouped_CV_R2_SD,
     `Prompt-grouped CV RMSE mean` = PromptGrouped_CV_RMSE_Mean,
     `Prompt-grouped CV RMSE SD` = PromptGrouped_CV_RMSE_SD
   )
@@ -1136,7 +1264,7 @@ workbook_tables <- list(
       InputRows = nrow(df_raw),
       CompleteAnalysisRows = nrow(analysis_df),
       ObjectiveMetricCount = length(objective_vars),
-      SubjectiveDimensionCount = length(human_vars),
+      SubjectiveAssessmentCount = length(human_vars),
       UniquePromptIDs = dplyr::n_distinct(analysis_df$PromptID),
       MainCorrelationMethod = "Spearman",
       SupplementaryCorrelationMethods = "Pearson; Kendall",
@@ -1149,6 +1277,7 @@ workbook_tables <- list(
     spearman_full_results = spearman_main_table,
     robust_correlations = robust_correlation_supplement,
     topk_overlap = topk_overlap,
+    topk_mean_overlap = topk_mean_overlap,
     univariate_prediction = univariate_prediction,
     paper_table_combined_prediction = paper_table_combined_prediction,
     combined_coefficients_vif = combined_coefficients_with_vif,
@@ -1180,7 +1309,7 @@ readme_lines <- c(
   paste0("- 原始输入行数：", nrow(df_raw)),
   paste0("- 完整分析样本数：", nrow(analysis_df)),
   paste0("- 唯一 PromptID 数量：", dplyr::n_distinct(analysis_df$PromptID)),
-  "- 分析变量包括 7 个客观指标和 4 个主观评分维度。",
+  "- 分析变量包括 7 个客观指标和 4 类主观评价结果。",
   "- 回归模型中，客观指标在训练数据内进行 z-score 标准化，使不同指标的回归系数具有可比性。",
   "- 新增的 PromptID 分组交叉验证会把同一个 PromptID 下的所有图像放入同一折，避免同一提示词生成的图像同时出现在训练集和测试集中。",
   "",
@@ -1191,12 +1320,13 @@ readme_lines <- c(
   "该工作簿集中保存 RQ1 的主要结果，避免生成过多分散的 CSV 文件。",
   "",
   "- `data_overview`：输入路径、sheet 名称、样本数、指标数、相关性方法、Top-K 设置、普通交叉验证和 PromptID 分组交叉验证设置。",
-  "- `descriptive_stats`：客观指标和主观评分维度的描述性统计。",
+  "- `descriptive_stats`：客观指标和主观评价结果的描述性统计。",
   "- `paper_table_spearman`：论文正文可直接使用的主观—客观 Spearman 相关性结果表。",
   "- `spearman_full_results`：长表格式的 Spearman 结果，包括原始 p 值、BH 校正 p 值、显著性标记和相关强度标签。",
   "- `robust_correlations`：Pearson 和 Kendall 补充相关性结果。",
   "- `topk_overlap`：Top 10、Top 20 和 Top 30 条件下，客观指标排序与主观评分排序的重叠结果。",
-  "- `univariate_prediction`：每个单独客观指标预测各人类评分维度的标准化线性回归结果。",
+  "- `topk_mean_overlap`：按客观指标和 Top-K 水平汇总的平均重叠率，用于正文优化版 Top-K 图。",
+  "- `univariate_prediction`：每个单独客观指标预测各主观评价结果的标准化线性回归结果。",
   "- `paper_table_combined_prediction`：论文正文可用的七指标联合模型结果表，包含全样本拟合、普通图像级交叉验证和 PromptID 分组交叉验证。",
   "- `combined_coefficients_vif`：七指标联合模型的回归系数和 VIF 诊断结果。该表用于补充说明，不用于因果解释。",
   "- `combined_model_cv`：普通图像级重复 20 次 5 折交叉验证结果。该结果用于评估核心图像集合内部的预测关联。",
@@ -1208,11 +1338,12 @@ readme_lines <- c(
   "",
   "图像文件保存在 `figures/` 子目录中：",
   "",
-  "- `rq1_spearman_correlation_heatmap.png` / `.pdf`：7 个客观指标与 4 个主观评分维度之间的 Spearman 相关性热力图。",
+  "- `rq1_spearman_correlation_heatmap.png` / `.pdf`：7 个客观指标与 4 类主观评价结果之间的 Spearman 相关性热力图。",
   "- `rq1_topk_overlap_heatmap.png` / `.pdf`：Top-K 排序重叠热力图，展示客观指标与主观高分图像排序的一致性。",
+  "- `rq1_topk_overlap_summary_figure.png` / `.pdf`：正文优化版 Top-K 排序重叠图，上半部分为 Top 30 热力图，下半部分为 Top 10、Top 20 和 Top 30 的平均重叠率。",
   "- `rq1_main_alignment_figure.png` / `.pdf`：合并主图，将 Spearman 相关热力图与 Top-K 排序重叠热力图并排展示。",
   "- `rq1_top3_composite_scatter.png` / `.pdf`：与总体主观评分最相关的 3 个客观指标散点图，用于观察关联形态和潜在离群点。",
-  "- `rq1_univariate_prediction_r2_heatmap.png` / `.pdf`：单指标线性回归 R² 热力图，用于展示不同指标与不同主观评分维度的预测关联强弱。",
+  "- `rq1_univariate_prediction_r2_heatmap.png` / `.pdf`：单指标线性回归 R² 热力图，用于展示不同指标与不同主观评价结果的预测关联强弱。",
   "- `rq1_combined_model_r2_comparison.png` / `.pdf`：七指标联合模型的全样本 R²、普通图像级 CV R² 和 PromptID 分组 CV R² 对比图。新增的 PromptID 分组结果用于稳健性检查。",
   "",
   "## 4. 建议在论文和附录中的使用方式",
@@ -1220,7 +1351,7 @@ readme_lines <- c(
   "- 正文：可使用 `paper_table_spearman` 作为 RQ1 的相关性主表。",
   "- 正文或补充材料：可使用 `paper_table_combined_prediction` 报告七指标联合模型结果，其中 PromptID 分组 CV 可作为稳健性检查列。",
   "- 附录：建议保留 `robust_correlations`、`topk_overlap`、`univariate_prediction`、`combined_coefficients_vif` 和 `combined_model_cv_comparison`。",
-  "- 图像：可使用 `rq1_main_alignment_figure` 作为正文主图；若需分开展示，也可分别使用 Spearman 热力图与 Top-K 热力图。`rq1_combined_model_r2_comparison` 可用于展示普通 CV 与 PromptID 分组 CV 的差异。",
+  "- 图像：可使用 `rq1_main_alignment_figure` 作为正文主图；如果需要突出 Top-K 排序重叠，建议正文使用 `rq1_topk_overlap_summary_figure`，完整 Top-K 热力图 `rq1_topk_overlap_heatmap` 可放入附录。`rq1_combined_model_r2_comparison` 可用于展示普通 CV 与 PromptID 分组 CV 的差异。",
   "",
   "## 5. 结果解释提示",
   "",

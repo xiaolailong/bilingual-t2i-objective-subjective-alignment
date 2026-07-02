@@ -28,7 +28,7 @@ options(stringsAsFactors = FALSE)
 # -----------------------------
 required_packages <- c(
   "readxl", "dplyr", "tidyr", "ggplot2", "writexl",
-  "stringr", "purrr", "tibble", "scales", "forcats"
+  "stringr", "purrr", "tibble", "scales", "forcats", "grid"
 )
 
 install_if_missing <- function(pkg) {
@@ -97,6 +97,36 @@ normalize_language <- function(x) {
   )
 }
 
+# Full generation-source labels used in figures.
+generation_source_levels <- c("Qwen-Image-2512", "Z-Image-Turbo", "SDXL-Turbo")
+model_full_label <- function(x) {
+  x0 <- stringr::str_trim(as.character(x))
+  x_low <- stringr::str_to_lower(x0)
+  dplyr::case_when(
+    stringr::str_detect(x_low, "qwen") ~ "Qwen-Image-2512",
+    stringr::str_detect(x_low, "z[\\s_-]*image|zimage|z-image|z_image") ~ "Z-Image-Turbo",
+    stringr::str_detect(x_low, "sdxl") ~ "SDXL-Turbo",
+    TRUE ~ x0
+  )
+}
+ordered_generation_source_levels <- function(x) {
+  ux <- unique(as.character(x))
+  c(generation_source_levels[generation_source_levels %in% ux], setdiff(sort(ux), generation_source_levels))
+}
+wrap_generation_source_labels <- function(x) {
+  stringr::str_replace_all(as.character(x), "-", "-\n")
+}
+short_generation_source_label <- function(x) {
+  x0 <- stringr::str_trim(as.character(x))
+  x_low <- stringr::str_to_lower(x0)
+  dplyr::case_when(
+    stringr::str_detect(x_low, "qwen") ~ "Qwen",
+    stringr::str_detect(x_low, "z[\\s_-]*image|zimage|z-image|z_image") ~ "Z-Image",
+    stringr::str_detect(x_low, "sdxl") ~ "SDXL",
+    TRUE ~ x0
+  )
+}
+
 normalize_prompt_id <- function(x) {
   str_trim(as.character(x))
 }
@@ -109,11 +139,14 @@ format_p <- function(p) {
   )
 }
 
-save_figure <- function(plot_obj, basename, width = 11, height = 7, dpi = 300) {
+save_figure <- function(plot_obj, basename, width = 6.5, height = 5, dpi = 300) {
+  # JEI manuscript text area is 6.5 in. wide by 9 in. high; cap exported figures accordingly.
+  width <- min(width, 6.5)
+  height <- min(height, 9)
   png_path <- file.path(figure_dir, paste0(basename, ".png"))
   pdf_path <- file.path(figure_dir, paste0(basename, ".pdf"))
-  ggsave(png_path, plot_obj, width = width, height = height, dpi = dpi)
-  ggsave(pdf_path, plot_obj, width = width, height = height)
+  ggsave(png_path, plot_obj, width = width, height = height, units = "in", dpi = dpi, bg = "white")
+  ggsave(pdf_path, plot_obj, width = width, height = height, units = "in", bg = "white")
 }
 
 safe_sd <- function(x) {
@@ -168,16 +201,19 @@ rank_models <- function(df) {
 # -----------------------------
 # Publication-style plotting helpers
 # -----------------------------
-sci_theme <- function(base_size = 11) {
-  theme_bw(base_size = base_size) +
+sci_theme <- function(base_size = 10) {
+  theme_bw(base_size = base_size, base_family = "serif") +
     theme(
-      panel.grid.major = element_line(color = "#E6E6E6", linewidth = 0.25),
-      panel.grid.minor = element_blank(),
+      panel.grid = element_blank(),
       strip.background = element_rect(fill = "#F2F2F2", color = NA),
-      strip.text = element_text(face = "bold"),
-      axis.text = element_text(color = "#333333"),
-      plot.title = element_text(face = "bold"),
-      legend.title = element_text(face = "bold")
+      strip.text = element_text(face = "bold", size = 8.3),
+      axis.text = element_text(color = "#333333", size = 8.2),
+      axis.title = element_text(size = 9.3),
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 10.5, margin = margin(b = 6)),
+      plot.subtitle = element_text(hjust = 0.5, size = 8.7),
+      plot.title.position = "plot",
+      legend.title = element_text(face = "bold", size = 8.3),
+      legend.text = element_text(size = 8)
     )
 }
 
@@ -243,7 +279,7 @@ prepare_score_data <- function(df, dataset_label) {
       Dataset = dataset_label,
       PromptID = normalize_prompt_id(PromptID),
       Language = normalize_language(Language),
-      ModelShortName = as.character(ModelShortName),
+      ModelShortName = model_full_label(ModelShortName),
       Resolution = as.character(Resolution),
       SeedNo = as.character(SeedNo)
     ) %>%
@@ -276,7 +312,7 @@ metric_labels <- tibble(
   MetricLabel = c("OpenCLIP", "CNCLIP", "Aesthetic", "MUSIQ", "ImageReward", "HPS v2.1", "VQAScore")
 )
 
-model_levels <- sort(unique(as.character(all_scores$ModelShortName)))
+model_levels <- ordered_generation_source_levels(all_scores$ModelShortName)
 model_palette <- setNames(c("#0072B2", "#D55E00", "#009E73")[seq_along(model_levels)], model_levels)
 model_shape_values <- setNames(c(16, 17, 15)[seq_along(model_levels)], model_levels)
 model_linetype_values <- setNames(c("solid", "dashed", "dotdash")[seq_along(model_levels)], model_levels)
@@ -482,6 +518,70 @@ language_shift_by_model <- long_scores %>%
   ungroup() %>%
   arrange(Dataset, ObjectiveMetric, ModelShortName)
 
+# Direction-based language-shift stability summary.
+# This table uses the BH-adjusted Wilcoxon results to classify each dataset--source--metric
+# cell as a stable English-over-Chinese shift, a stable Chinese-over-English shift, or no
+# statistically supported shift. It is intended to support a direction-and-stability figure,
+# avoiding cross-metric interpretation of raw score magnitudes.
+alpha_bh_language <- 0.05
+
+language_shift_direction_long <- language_shift_by_model %>%
+  mutate(
+    SignificantBH = !is.na(PAdjBH_within_dataset_metric) & PAdjBH_within_dataset_metric < alpha_bh_language,
+    DirectionCode = case_when(
+      SignificantBH & MeanShift > 0 ~ "EN_gt_CN",
+      SignificantBH & MeanShift < 0 ~ "CN_gt_EN",
+      TRUE ~ "No_stable_shift"
+    ),
+    DirectionLabel = case_when(
+      DirectionCode == "EN_gt_CN" ~ "EN > CN",
+      DirectionCode == "CN_gt_EN" ~ "CN > EN",
+      TRUE ~ "n.s."
+    ),
+    DirectionShort = case_when(
+      DirectionCode == "EN_gt_CN" ~ "EN>CN",
+      DirectionCode == "CN_gt_EN" ~ "CN>EN",
+      TRUE ~ "n.s."
+    )
+  )
+
+language_shift_direction_stability <- language_shift_direction_long %>%
+  select(
+    ModelShortName, ObjectiveMetric, MetricLabel, Dataset, PairCount,
+    MeanShift, MedianShift, WilcoxonP, PAdjBH_within_dataset_metric,
+    DirectionCode, DirectionLabel, DirectionShort
+  ) %>%
+  pivot_wider(
+    names_from = Dataset,
+    values_from = c(
+      PairCount, MeanShift, MedianShift, WilcoxonP, PAdjBH_within_dataset_metric,
+      DirectionCode, DirectionLabel, DirectionShort
+    ),
+    names_sep = "_"
+  ) %>%
+  mutate(
+    CoreSupported = DirectionCode_Core360 %in% c("EN_gt_CN", "CN_gt_EN"),
+    ExtendedSupported = DirectionCode_Extended1440 %in% c("EN_gt_CN", "CN_gt_EN"),
+    StabilityClass = case_when(
+      CoreSupported & ExtendedSupported & DirectionCode_Core360 == DirectionCode_Extended1440 & DirectionCode_Core360 == "EN_gt_CN" ~ "Stable EN > CN",
+      CoreSupported & ExtendedSupported & DirectionCode_Core360 == DirectionCode_Extended1440 & DirectionCode_Core360 == "CN_gt_EN" ~ "Stable CN > EN",
+      CoreSupported & ExtendedSupported & DirectionCode_Core360 != DirectionCode_Extended1440 ~ "Reversed direction",
+      CoreSupported & !ExtendedSupported ~ "Core only",
+      !CoreSupported & ExtendedSupported ~ "Extended only",
+      TRUE ~ "No stable shift"
+    ),
+    CellLabel = paste0("Core: ", DirectionShort_Core360, "\nExt: ", DirectionShort_Extended1440)
+  ) %>%
+  arrange(ObjectiveMetric, ModelShortName)
+
+language_shift_direction_summary <- language_shift_direction_stability %>%
+  count(StabilityClass, name = "CellCount") %>%
+  mutate(
+    Percent = CellCount / sum(CellCount),
+    PercentLabel = scales::percent(Percent, accuracy = 0.1)
+  ) %>%
+  arrange(desc(CellCount), StabilityClass)
+
 language_shift_overall <- long_scores %>%
   select(Dataset, PromptID, SeedNo, ModelShortName, ObjectiveMetric, MetricLabel, Language, MetricValue) %>%
   filter(Language %in% c("Chinese", "English")) %>%
@@ -533,6 +633,127 @@ language_shift_by_prompt_attribute <- long_scores %>%
     .groups = "drop"
   ) %>%
   arrange(Dataset, PromptAttribute, AttributeValue, ObjectiveMetric)
+
+# -----------------------------
+# 8. Generation-source pairwise difference analysis
+# -----------------------------
+source_pair_defs <- combn(model_levels, 2, simplify = FALSE)
+
+source_pairwise_differences <- purrr::map_dfr(source_pair_defs, function(pair) {
+  source_a <- pair[1]
+  source_b <- pair[2]
+  source_a_short <- short_generation_source_label(source_a)
+  source_b_short <- short_generation_source_label(source_b)
+
+  long_scores %>%
+    select(Dataset, Language, PromptID, SeedNo, ObjectiveMetric, MetricLabel, ModelShortName, MetricValue) %>%
+    filter(ModelShortName %in% c(source_a, source_b)) %>%
+    pivot_wider(names_from = ModelShortName, values_from = MetricValue) %>%
+    filter(!is.na(.data[[source_a]]), !is.na(.data[[source_b]])) %>%
+    mutate(
+      SourceA = source_a,
+      SourceB = source_b,
+      SourceAShort = source_a_short,
+      SourceBShort = source_b_short,
+      SourcePair = paste0(source_a, ' vs ', source_b),
+      SourcePairShort = paste0(source_a_short, ' vs ', source_b_short),
+      SourceDiff = .data[[source_a]] - .data[[source_b]]
+    ) %>%
+    group_by(Dataset, Language, ObjectiveMetric, MetricLabel, SourceA, SourceB, SourceAShort, SourceBShort, SourcePair, SourcePairShort) %>%
+    summarise(
+      PairCount = n(),
+      MeanSourceA = mean(.data[[source_a]], na.rm = TRUE),
+      MeanSourceB = mean(.data[[source_b]], na.rm = TRUE),
+      MeanDiff = mean(SourceDiff, na.rm = TRUE),
+      SDDiff = safe_sd(SourceDiff),
+      MedianDiff = median(SourceDiff, na.rm = TRUE),
+      Q1Diff = quantile(SourceDiff, 0.25, na.rm = TRUE, names = FALSE),
+      Q3Diff = quantile(SourceDiff, 0.75, na.rm = TRUE, names = FALSE),
+      AbsMeanDiff = abs(MeanDiff),
+      WilcoxonP = safe_wilcox_paired(.data[[source_b]], .data[[source_a]]),
+      .groups = 'drop'
+    )
+}) %>%
+  group_by(Dataset, Language, ObjectiveMetric) %>%
+  mutate(PAdjBH_within_dataset_language_metric = p.adjust(WilcoxonP, method = 'BH')) %>%
+  ungroup() %>%
+  arrange(Language, ObjectiveMetric, SourceA, SourceB, Dataset)
+
+alpha_bh_source <- 0.05
+
+source_pair_direction_long <- source_pairwise_differences %>%
+  mutate(
+    SignificantBH = !is.na(PAdjBH_within_dataset_language_metric) & PAdjBH_within_dataset_language_metric < alpha_bh_source,
+    DirectionCode = case_when(
+      SignificantBH & MeanDiff > 0 ~ 'A_gt_B',
+      SignificantBH & MeanDiff < 0 ~ 'B_gt_A',
+      TRUE ~ 'No_clear_difference'
+    ),
+    DirectionLabel = case_when(
+      DirectionCode == 'A_gt_B' ~ paste0(SourceAShort, ' > ', SourceBShort),
+      DirectionCode == 'B_gt_A' ~ paste0(SourceBShort, ' > ', SourceAShort),
+      TRUE ~ 'n.s.'
+    ),
+    DirectionShort = case_when(
+      DirectionCode == 'A_gt_B' ~ paste0(SourceAShort, '>', SourceBShort),
+      DirectionCode == 'B_gt_A' ~ paste0(SourceBShort, '>', SourceAShort),
+      TRUE ~ 'n.s.'
+    )
+  )
+
+source_pair_direction_stability <- source_pair_direction_long %>%
+  select(
+    Language, SourceA, SourceB, SourceAShort, SourceBShort, SourcePair, SourcePairShort,
+    ObjectiveMetric, MetricLabel, Dataset, PairCount, MeanDiff, MedianDiff,
+    WilcoxonP, PAdjBH_within_dataset_language_metric,
+    DirectionCode, DirectionLabel, DirectionShort
+  ) %>%
+  pivot_wider(
+    names_from = Dataset,
+    values_from = c(
+      PairCount, MeanDiff, MedianDiff, WilcoxonP, PAdjBH_within_dataset_language_metric,
+      DirectionCode, DirectionLabel, DirectionShort
+    ),
+    names_sep = '_'
+  ) %>%
+  mutate(
+    CoreSupported = DirectionCode_Core360 %in% c('A_gt_B', 'B_gt_A'),
+    ExtendedSupported = DirectionCode_Extended1440 %in% c('A_gt_B', 'B_gt_A'),
+    StabilityClass = case_when(
+      CoreSupported & ExtendedSupported & DirectionCode_Core360 == DirectionCode_Extended1440 ~ 'Stable same direction',
+      CoreSupported & ExtendedSupported & DirectionCode_Core360 != DirectionCode_Extended1440 ~ 'Reversed direction',
+      CoreSupported & !ExtendedSupported ~ 'Core only',
+      !CoreSupported & ExtendedSupported ~ 'Extended only',
+      TRUE ~ 'No clear difference'
+    ),
+    CellLabel = paste0('Core: ', DirectionShort_Core360, '\nExt: ', DirectionShort_Extended1440)
+  ) %>%
+  arrange(Language, ObjectiveMetric, SourceA, SourceB)
+
+source_pair_stability_levels <- c(
+  'Stable same direction',
+  'Reversed direction',
+  'Core only',
+  'Extended only',
+  'No clear difference'
+)
+
+source_pair_stability_summary <- source_pair_direction_stability %>%
+  mutate(MetricLabel = factor(MetricLabel, levels = metric_labels$MetricLabel)) %>%
+  count(Language, MetricLabel, StabilityClass, name = 'PairCount') %>%
+  tidyr::complete(
+    Language,
+    MetricLabel,
+    StabilityClass = source_pair_stability_levels,
+    fill = list(PairCount = 0)
+  ) %>%
+  group_by(Language, MetricLabel) %>%
+  mutate(
+    TotalPairs = sum(PairCount),
+    PairProportion = ifelse(TotalPairs > 0, PairCount / TotalPairs, NA_real_)
+  ) %>%
+  ungroup() %>%
+  arrange(Language, MetricLabel, match(StabilityClass, source_pair_stability_levels))
 
 # -----------------------------
 # 8. Model ranking and ranking stability
@@ -639,6 +860,73 @@ prompt_attribute_objective_mean_z <- all_scores %>%
   ) %>%
   arrange(Dataset, PromptAttribute, AttributeValue)
 
+# Single-metric prompt-attribute heterogeneity analysis.
+# This replaces the previous bar-plot-only multi-metric mean contrast.
+# It examines whether each prompt attribute is associated with larger
+# metric-specific score heterogeneity across its attribute levels.
+# Values are standardized within each metric across pooled Core360 and Extended1440 images.
+prompt_attribute_metric_z_summary <- all_scores %>%
+  select(
+    Dataset, PromptID, ModelShortName, Language,
+    starts_with("z_"),
+    primary_category, complexity_level, style_type,
+    culture_specific, text_symbol_requirement
+  ) %>%
+  pivot_longer(
+    cols = starts_with("z_"),
+    names_to = "ObjectiveMetric",
+    values_to = "MetricZ"
+  ) %>%
+  mutate(ObjectiveMetric = str_remove(ObjectiveMetric, "^z_")) %>%
+  left_join(metric_labels, by = "ObjectiveMetric") %>%
+  pivot_longer(
+    cols = c(primary_category, complexity_level, style_type, culture_specific, text_symbol_requirement),
+    names_to = "PromptAttribute",
+    values_to = "AttributeValue"
+  ) %>%
+  filter(!is.na(AttributeValue), AttributeValue != "") %>%
+  group_by(Dataset, PromptAttribute, AttributeValue, ObjectiveMetric, MetricLabel) %>%
+  summarise(
+    ImageCount = sum(!is.na(MetricZ)),
+    PromptCount = n_distinct(PromptID),
+    MeanMetricZ = mean(MetricZ, na.rm = TRUE),
+    SDMetricZ = safe_sd(MetricZ),
+    MedianMetricZ = median(MetricZ, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Dataset, PromptAttribute, AttributeValue, ObjectiveMetric)
+
+prompt_attribute_metric_heterogeneity <- prompt_attribute_metric_z_summary %>%
+  filter(!is.na(MeanMetricZ)) %>%
+  group_by(Dataset, PromptAttribute, ObjectiveMetric, MetricLabel) %>%
+  summarise(
+    AttributeLevelCount = n(),
+    MaxAttributeValue = AttributeValue[which.max(MeanMetricZ)][1],
+    MaxMeanMetricZ = max(MeanMetricZ, na.rm = TRUE),
+    MinAttributeValue = AttributeValue[which.min(MeanMetricZ)][1],
+    MinMeanMetricZ = min(MeanMetricZ, na.rm = TRUE),
+    RangeMeanMetricZ = MaxMeanMetricZ - MinMeanMetricZ,
+    SmallestPromptCount = min(PromptCount, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Dataset, PromptAttribute, ObjectiveMetric)
+
+prompt_attribute_heterogeneity_summary <- prompt_attribute_metric_heterogeneity %>%
+  group_by(Dataset, PromptAttribute) %>%
+  summarise(
+    MetricCount = n_distinct(ObjectiveMetric),
+    MedianRangeMeanMetricZ = median(RangeMeanMetricZ, na.rm = TRUE),
+    MeanRangeMeanMetricZ = mean(RangeMeanMetricZ, na.rm = TRUE),
+    MaxRangeMeanMetricZ = max(RangeMeanMetricZ, na.rm = TRUE),
+    MetricsWithRangeGE_0_50 = sum(RangeMeanMetricZ >= 0.50, na.rm = TRUE),
+    MetricsWithRangeGE_0_75 = sum(RangeMeanMetricZ >= 0.75, na.rm = TRUE),
+    LargestContrastMetric = MetricLabel[which.max(RangeMeanMetricZ)][1],
+    LargestContrastRange = max(RangeMeanMetricZ, na.rm = TRUE),
+    SmallestPromptCount = min(SmallestPromptCount, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Dataset, desc(MedianRangeMeanMetricZ), PromptAttribute)
+
 # -----------------------------
 # 10. Resource summary for later practical applicability analysis
 # -----------------------------
@@ -674,6 +962,103 @@ table_language_shift_for_paper <- language_shift_overall %>%
   ) %>%
   select(Dataset, MetricLabel, PairCount, MeanChinese, MeanEnglish, MeanShift, MedianShift, PAdjBH)
 
+table_language_shift_direction_for_paper <- language_shift_direction_stability %>%
+  mutate(
+    MeanShift_Core360 = round(MeanShift_Core360, 3),
+    MedianShift_Core360 = round(MedianShift_Core360, 3),
+    MeanShift_Extended1440 = round(MeanShift_Extended1440, 3),
+    MedianShift_Extended1440 = round(MedianShift_Extended1440, 3),
+    WilcoxonP_Core360 = format_p(WilcoxonP_Core360),
+    WilcoxonP_Extended1440 = format_p(WilcoxonP_Extended1440),
+    PAdjBH_within_dataset_metric_Core360 = format_p(PAdjBH_within_dataset_metric_Core360),
+    PAdjBH_within_dataset_metric_Extended1440 = format_p(PAdjBH_within_dataset_metric_Extended1440)
+  ) %>%
+  select(
+    MetricLabel, ModelShortName,
+    PairCount_Core360, MeanShift_Core360, MedianShift_Core360,
+    WilcoxonP_Core360, PAdjBH_within_dataset_metric_Core360, DirectionLabel_Core360,
+    PairCount_Extended1440, MeanShift_Extended1440, MedianShift_Extended1440,
+    WilcoxonP_Extended1440, PAdjBH_within_dataset_metric_Extended1440, DirectionLabel_Extended1440,
+    StabilityClass
+  )
+
+table_source_pair_direction_for_paper <- source_pair_direction_stability %>%
+  mutate(
+    MeanDiff_Core360 = round(MeanDiff_Core360, 3),
+    MedianDiff_Core360 = round(MedianDiff_Core360, 3),
+    MeanDiff_Extended1440 = round(MeanDiff_Extended1440, 3),
+    MedianDiff_Extended1440 = round(MedianDiff_Extended1440, 3),
+    WilcoxonP_Core360 = format_p(WilcoxonP_Core360),
+    WilcoxonP_Extended1440 = format_p(WilcoxonP_Extended1440),
+    PAdjBH_within_dataset_language_metric_Core360 = format_p(PAdjBH_within_dataset_language_metric_Core360),
+    PAdjBH_within_dataset_language_metric_Extended1440 = format_p(PAdjBH_within_dataset_language_metric_Extended1440)
+  ) %>%
+  select(
+    Language, MetricLabel, SourcePairShort,
+    PairCount_Core360, MeanDiff_Core360, MedianDiff_Core360,
+    WilcoxonP_Core360, PAdjBH_within_dataset_language_metric_Core360, DirectionLabel_Core360,
+    PairCount_Extended1440, MeanDiff_Extended1440, MedianDiff_Extended1440,
+    WilcoxonP_Extended1440, PAdjBH_within_dataset_language_metric_Extended1440, DirectionLabel_Extended1440,
+    StabilityClass
+  )
+
+table_source_pair_stability_summary_for_paper <- source_pair_stability_summary %>%
+  mutate(
+    PairProportion = round(PairProportion, 3)
+  ) %>%
+  select(Language, MetricLabel, StabilityClass, PairCount, TotalPairs, PairProportion)
+
+source_direction_to_short <- function(x) {
+  dplyr::case_when(
+    x == "Qwen > SDXL" ~ "Q>S",
+    x == "SDXL > Qwen" ~ "S>Q",
+    x == "Qwen > Z-Image" ~ "Q>Z",
+    x == "Z-Image > Qwen" ~ "Z>Q",
+    x == "Z-Image > SDXL" ~ "Z>S",
+    x == "SDXL > Z-Image" ~ "S>Z",
+    TRUE ~ x
+  )
+}
+
+stable_source_pair_directions <- source_pair_direction_stability %>%
+  filter(StabilityClass == "Stable same direction") %>%
+  mutate(
+    SourcePairOrder = match(SourcePairShort, c("Qwen vs SDXL", "Qwen vs Z-Image", "Z-Image vs SDXL")),
+    StableDirectionShort = source_direction_to_short(DirectionLabel_Core360)
+  ) %>%
+  arrange(Language, MetricLabel, SourcePairOrder) %>%
+  group_by(Language, MetricLabel) %>%
+  summarise(
+    StableSourcePairDirections = paste(StableDirectionShort, collapse = "; "),
+    .groups = "drop"
+  )
+
+table_source_tendency_stability_for_paper <- source_pair_stability_summary %>%
+  select(Language, MetricLabel, StabilityClass, PairCount) %>%
+  mutate(
+    MetricLabel = factor(MetricLabel, levels = metric_labels$MetricLabel),
+    StabilityClass = factor(StabilityClass, levels = source_pair_stability_levels)
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = StabilityClass,
+    values_from = PairCount,
+    values_fill = 0
+  ) %>%
+  left_join(stable_source_pair_directions, by = c("Language", "MetricLabel")) %>%
+  mutate(
+    StableSourcePairDirections = ifelse(is.na(StableSourcePairDirections) | StableSourcePairDirections == "", "--", StableSourcePairDirections),
+    `Stable / 3` = paste0(`Stable same direction`, "/3"),
+    `Rev/Core/Ext/NS` = paste(`Reversed direction`, `Core only`, `Extended only`, `No clear difference`, sep = "/")
+  ) %>%
+  arrange(factor(Language, levels = c("Chinese", "English")), MetricLabel) %>%
+  transmute(
+    Metric = as.character(MetricLabel),
+    Language,
+    `Stable / 3`,
+    `Rev/Core/Ext/NS`,
+    `Stable source-pair directions` = StableSourcePairDirections
+  )
+
 table_model_rank_stability_for_paper <- model_rank_stability %>%
   mutate(
     RankSpearman_Core_vs_Extended = round(RankSpearman_Core_vs_Extended, 3),
@@ -701,27 +1086,42 @@ table_prompt_attribute_for_paper <- prompt_attribute_objective_mean_z %>%
   select(Dataset, PromptAttribute, AttributeValue, PromptCount, ImageCount,
          MeanObjectiveMeanZ, SDObjectiveMeanZ, MedianObjectiveMeanZ)
 
-# Compact prompt-attribute contrast table.
-# This keeps the most interpretable attribute-level signal instead of exporting all detailed groups.
-table_prompt_attribute_contrast_for_paper <- prompt_attribute_objective_mean_z %>%
-  filter(!is.na(MeanObjectiveMeanZ)) %>%
-  group_by(Dataset, PromptAttribute) %>%
-  summarise(
-    AttributeLevelCount = n(),
-    MaxAttributeValue = AttributeValue[which.max(MeanObjectiveMeanZ)][1],
-    MaxMeanObjectiveMeanZ = max(MeanObjectiveMeanZ, na.rm = TRUE),
-    MinAttributeValue = AttributeValue[which.min(MeanObjectiveMeanZ)][1],
-    MinMeanObjectiveMeanZ = min(MeanObjectiveMeanZ, na.rm = TRUE),
-    RangeMeanObjectiveMeanZ = MaxMeanObjectiveMeanZ - MinMeanObjectiveMeanZ,
-    SmallestPromptCount = min(PromptCount, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
+table_prompt_attribute_metric_z_for_paper <- prompt_attribute_metric_z_summary %>%
   mutate(
-    MaxMeanObjectiveMeanZ = round(MaxMeanObjectiveMeanZ, 3),
-    MinMeanObjectiveMeanZ = round(MinMeanObjectiveMeanZ, 3),
-    RangeMeanObjectiveMeanZ = round(RangeMeanObjectiveMeanZ, 3)
+    MeanMetricZ = round(MeanMetricZ, 3),
+    SDMetricZ = round(SDMetricZ, 3),
+    MedianMetricZ = round(MedianMetricZ, 3)
   ) %>%
-  arrange(Dataset, desc(RangeMeanObjectiveMeanZ), PromptAttribute)
+  select(
+    Dataset, PromptAttribute, AttributeValue, MetricLabel,
+    PromptCount, ImageCount, MeanMetricZ, SDMetricZ, MedianMetricZ
+  )
+
+table_prompt_attribute_heterogeneity_for_paper <- prompt_attribute_metric_heterogeneity %>%
+  mutate(
+    MaxMeanMetricZ = round(MaxMeanMetricZ, 3),
+    MinMeanMetricZ = round(MinMeanMetricZ, 3),
+    RangeMeanMetricZ = round(RangeMeanMetricZ, 3)
+  ) %>%
+  select(
+    Dataset, PromptAttribute, MetricLabel, AttributeLevelCount,
+    MaxAttributeValue, MaxMeanMetricZ, MinAttributeValue, MinMeanMetricZ,
+    RangeMeanMetricZ, SmallestPromptCount
+  )
+
+table_prompt_attribute_heterogeneity_summary_for_paper <- prompt_attribute_heterogeneity_summary %>%
+  mutate(
+    MedianRangeMeanMetricZ = round(MedianRangeMeanMetricZ, 3),
+    MeanRangeMeanMetricZ = round(MeanRangeMeanMetricZ, 3),
+    MaxRangeMeanMetricZ = round(MaxRangeMeanMetricZ, 3),
+    LargestContrastRange = round(LargestContrastRange, 3)
+  ) %>%
+  select(
+    Dataset, PromptAttribute, MetricCount, MedianRangeMeanMetricZ,
+    MeanRangeMeanMetricZ, MaxRangeMeanMetricZ,
+    MetricsWithRangeGE_0_50, MetricsWithRangeGE_0_75,
+    LargestContrastMetric, LargestContrastRange, SmallestPromptCount
+  )
 
 # -----------------------------
 # 12. Figures
@@ -767,39 +1167,40 @@ fig_model_metric_profiles <- ggplot(
   scale_shape_manual(values = model_shape_values) +
   scale_linetype_manual(values = model_linetype_values) +
   labs(
-    title = "Standardized objective-metric profiles by generation source, prompt set, and language",
+    title = "Standardized metric profiles by source and language",
     x = "Objective metric",
     y = "Mean standardized metric score",
     color = "Generation source",
     shape = "Generation source",
     linetype = "Generation source"
   ) +
-  sci_theme(base_size = 11) +
+  sci_theme(base_size = 10) +
   theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
-    legend.position = "top"
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 8),
+    legend.position = "top",
+    legend.box = "vertical"
   )
-save_figure(fig_model_metric_profiles, "rq3_model_metric_profiles", width = 13, height = 8)
+save_figure(fig_model_metric_profiles, "rq3_model_metric_profiles", width = 6.5, height = 5.2)
 
 # Figure 2: Correlation heatmap for core vs extended objective-only sets.
 fig_cor_heatmap <- ggplot(cor_heatmap_data, aes(x = Metric1Label, y = Metric2Label, fill = SpearmanRho)) +
   geom_tile(color = "white", linewidth = 0.3) +
-  geom_text(aes(label = sprintf("%.2f", SpearmanRho)), size = 2.8) +
+  geom_text(aes(label = sprintf("%.2f", SpearmanRho)), size = 2.0) +
   facet_wrap(~ Dataset) +
   scale_fill_gradientn(
     colours = diverging_palette,
     values = scales::rescale(c(-1, -0.4, 0, 0.4, 1)),
     limits = c(-1, 1),
-    name = "Spearman rho"
+    name = "Spearman's rho"
   ) +
   labs(
-    title = "Inter-metric Spearman correlations in Core360 and Extended1440",
-    x = "Metric",
-    y = "Metric"
+    title = "Inter-metric correlations in Core360 and Extended1440",
+    x = "Objective metric",
+    y = "Objective metric"
   ) +
-  sci_theme(base_size = 11) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-save_figure(fig_cor_heatmap, "rq3_metric_correlation_heatmap", width = 12, height = 6.5)
+  sci_theme(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 8))
+save_figure(fig_cor_heatmap, "rq3_metric_correlation_heatmap", width = 6.5, height = 4.3)
 
 # Figure 3: Language shift heatmap by dataset, model, and metric.
 language_shift_limit <- max(abs(language_shift_by_model$MeanShift), na.rm = TRUE)
@@ -810,7 +1211,7 @@ fig_language_shift <- language_shift_by_model %>%
   ) %>%
   ggplot(aes(x = MetricLabel, y = ModelShortName, fill = MeanShift)) +
   geom_tile(color = "white", linewidth = 0.3) +
-  geom_text(aes(label = sprintf("%.2f", MeanShift)), size = 2.7) +
+  geom_text(aes(label = sprintf("%.2f", MeanShift)), size = 2.4) +
   facet_wrap(~ Dataset) +
   scale_fill_gradientn(
     colours = diverging_palette,
@@ -818,16 +1219,108 @@ fig_language_shift <- language_shift_by_model %>%
     limits = c(-language_shift_limit, language_shift_limit),
     name = "EN - CN"
   ) +
+  scale_y_discrete(labels = wrap_generation_source_labels) +
   labs(
-    title = "Mean prompt-language shift in objective metrics (English minus Chinese)",
+    title = "Prompt-language shift (English minus Chinese)",
     x = "Objective metric",
     y = "Generation source"
   ) +
-  sci_theme(base_size = 11) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-save_figure(fig_language_shift, "rq3_language_shift_heatmap", width = 12, height = 6.5)
+  sci_theme(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 8, lineheight = 0.9)
+  )
+save_figure(fig_language_shift, "rq3_language_shift_heatmap", width = 6.5, height = 4.2)
 
-# Figure 4: Model ranking heatmap.
+# Figure 3b: Direction and Core--Extended stability of prompt-language shifts.
+# Unlike the raw-value heatmap above, this figure emphasizes the BH-adjusted direction
+# of English-minus-Chinese shifts and whether that direction is maintained from Core360
+# to Extended1440. It is the recommended main-text figure for language-shift stability.
+stability_palette <- c(
+  "Stable EN > CN" = "#D6604D",
+  "Stable CN > EN" = "#3B4CC0",
+  "Reversed direction" = "#7B3294",
+  "Core only" = "#F4A582",
+  "Extended only" = "#92C5DE",
+  "No stable shift" = "#D9D9D9"
+)
+
+fig_language_shift_direction_stability <- language_shift_direction_stability %>%
+  mutate(
+    MetricLabel = factor(MetricLabel, levels = metric_labels$MetricLabel),
+    ModelShortName = factor(ModelShortName, levels = model_levels),
+    StabilityClass = factor(StabilityClass, levels = names(stability_palette))
+  ) %>%
+  ggplot(aes(x = MetricLabel, y = ModelShortName, fill = StabilityClass)) +
+  geom_tile(color = "white", linewidth = 0.35) +
+  geom_text(aes(label = CellLabel), size = 1.95, lineheight = 0.85) +
+  scale_fill_manual(values = stability_palette, drop = FALSE, name = "BH-adjusted\nshift pattern") +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
+  scale_y_discrete(labels = wrap_generation_source_labels) +
+  labs(
+    title = "Direction stability of prompt-language shifts",
+    subtitle = "Cell labels show BH-adjusted English-minus-Chinese direction in Core360 and Extended1440",
+    x = "Objective metric",
+    y = "Generation source"
+  ) +
+  sci_theme(base_size = 9.2) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.key.width = unit(0.55, "cm"),
+    legend.key.height = unit(0.35, "cm"),
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 7.7),
+    axis.text.y = element_text(size = 7.8, lineheight = 0.9),
+    plot.subtitle = element_text(size = 7.7)
+  )
+save_figure(fig_language_shift_direction_stability, "rq3_language_shift_direction_stability", width = 6.5, height = 3.9)
+
+# Figure 4: Pairwise generation-source scoring-tendency stability (reference figure).
+# This figure uses the same BH-adjusted directional logic as the language-shift figure,
+# but applies it to paired differences between generation sources under the same
+# dataset, prompt language, PromptID, and random seed.
+source_pair_reference_palette <- c(
+  "Stable same direction" = "#5AAE61",
+  "Reversed direction" = "#7B3294",
+  "Core only" = "#F4A582",
+  "Extended only" = "#92C5DE",
+  "No clear difference" = "#D9D9D9"
+)
+
+# Ensure the source-pair order is fixed and readable.
+fig_generation_source_pair_direction_stability <- source_pair_direction_stability %>%
+  mutate(
+    Language = factor(Language, levels = c("Chinese", "English")),
+    MetricLabel = factor(MetricLabel, levels = metric_labels$MetricLabel),
+    SourcePairShort = factor(SourcePairShort, levels = c("Qwen vs Z-Image", "Qwen vs SDXL", "Z-Image vs SDXL")),
+    StabilityClass = factor(StabilityClass, levels = source_pair_stability_levels)
+  ) %>%
+  ggplot(aes(x = MetricLabel, y = SourcePairShort, fill = StabilityClass)) +
+  geom_tile(color = "white", linewidth = 0.35) +
+  geom_text(aes(label = CellLabel), size = 1.85, lineheight = 0.82) +
+  facet_wrap(~ Language, ncol = 1) +
+  scale_fill_manual(values = source_pair_reference_palette, drop = FALSE, name = "BH-adjusted\nsource pattern") +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
+  labs(
+    title = "Pairwise generation-source scoring-tendency stability",
+    subtitle = "Cell labels show BH-adjusted source-pair direction in Core360 and Extended1440",
+    x = "Objective metric",
+    y = "Generation-source pair"
+  ) +
+  sci_theme(base_size = 9.0) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.key.width = unit(0.55, "cm"),
+    legend.key.height = unit(0.35, "cm"),
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 7.7),
+    axis.text.y = element_text(size = 7.8),
+    plot.subtitle = element_text(size = 7.6),
+    strip.text = element_text(face = "bold", size = 8.0)
+  )
+save_figure(fig_generation_source_pair_direction_stability, "rq3_generation_source_pair_direction_stability", width = 6.5, height = 4.8)
+
+# Figure 5: Model ranking heatmap.
 fig_model_ranking <- model_ranking_summary %>%
   mutate(
     MetricLabel = factor(MetricLabel, levels = metric_labels$MetricLabel),
@@ -836,19 +1329,23 @@ fig_model_ranking <- model_ranking_summary %>%
   ) %>%
   ggplot(aes(x = MetricLabel, y = ModelShortName, fill = ModelRankFactor)) +
   geom_tile(color = "white", linewidth = 0.3) +
-  geom_text(aes(label = ModelRank), size = 3) +
+  geom_text(aes(label = ModelRank), size = 2.6) +
   facet_grid(Dataset ~ Language) +
   scale_fill_manual(values = rank_palette, drop = FALSE, name = "Rank") +
+  scale_y_discrete(labels = wrap_generation_source_labels) +
   labs(
-    title = "Metric-specific generation-source ordering across prompt sets and languages",
+    title = "Generation-source ranking by metric",
     x = "Objective metric",
     y = "Generation source"
   ) +
-  sci_theme(base_size = 11) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-save_figure(fig_model_ranking, "rq3_model_ranking_heatmap", width = 13, height = 8)
+  sci_theme(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 35, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 8, lineheight = 0.9)
+  )
+save_figure(fig_model_ranking, "rq3_model_ranking_heatmap", width = 6.5, height = 5.4)
 
-# Figure 5: Metric-specific generation-source ordering across prompt sets and languages.
+# Figure 6: Metric-specific generation-source ordering across prompt sets and languages.
 # This publication-oriented slopegraph directly shows whether model ordering is preserved
 # from Core360 to Extended1440 for each metric under Chinese and English prompts.
 fig_generation_source_ordering <- model_ranking_summary %>%
@@ -859,44 +1356,32 @@ fig_generation_source_ordering <- model_ranking_summary %>%
     ModelShortName = factor(ModelShortName, levels = model_levels)
   ) %>%
   ggplot(aes(x = Dataset, y = ModelRank, group = ModelShortName, color = ModelShortName)) +
-  geom_line(linewidth = 0.8, alpha = 0.95) +
-  geom_point(size = 2.2) +
+  geom_line(linewidth = 0.65, alpha = 0.95) +
+  geom_point(size = 1.7) +
   facet_grid(Language ~ MetricLabel) +
-  scale_color_manual(values = model_palette, name = "Generation source") +
+  scale_color_manual(values = model_palette, name = "Generation source", drop = FALSE) +
+  scale_x_discrete(labels = c("Core360" = "Core", "Extended1440" = "Ext")) +
   scale_y_reverse(
     breaks = c(1, 2, 3),
     limits = c(3.15, 0.85),
     labels = c("1", "2", "3")
   ) +
   labs(
-    title = "Metric-specific generation-source ordering across prompt sets and languages",
-    subtitle = "Horizontal lines indicate stable ordering from Core360 to Extended1440; crossings indicate ordering changes.",
+    title = "Core–Extended ranking stability",
     x = "Prompt set",
-    y = "Generation-source rank (1 = highest mean score)"
+    y = "Rank (1 = highest)"
   ) +
-  sci_theme(base_size = 11) +
+  sci_theme(base_size = 8.4) +
   theme(
     legend.position = "top",
-    axis.text.x = element_text(angle = 0, hjust = 0.5)
+    legend.box = "vertical",
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 6.9),
+    axis.text.y = element_text(size = 7.0),
+    strip.text = element_text(face = "bold", size = 7.0),
+    strip.text.x = element_text(margin = margin(b = 2)),
+    strip.text.y = element_text(angle = 0)
   )
-save_figure(fig_generation_source_ordering, "rq3_generation_source_ordering", width = 15, height = 6.8)
-
-# Figure 6: Compact prompt-attribute contrast.
-# This appendix figure shows the range of standardized multi-metric means across attribute levels.
-fig_prompt_attribute_contrast <- table_prompt_attribute_contrast_for_paper %>%
-  mutate(PromptAttribute = fct_reorder(PromptAttribute, RangeMeanObjectiveMeanZ, .fun = mean, .desc = TRUE)) %>%
-  ggplot(aes(x = PromptAttribute, y = RangeMeanObjectiveMeanZ, fill = Dataset)) +
-  geom_col(width = 0.7) +
-  facet_wrap(~ Dataset) +
-  scale_fill_manual(values = dataset_palette, guide = "none") +
-  labs(
-    title = "Prompt-attribute sensitivity of objective-metric profiles",
-    x = "Prompt attribute",
-    y = "Range of mean standardized multi-metric score"
-  ) +
-  sci_theme(base_size = 11) +
-  theme(axis.text.x = element_text(angle = 35, hjust = 1))
-save_figure(fig_prompt_attribute_contrast, "rq3_prompt_attribute_contrast", width = 10, height = 6.5)
+save_figure(fig_generation_source_ordering, "rq3_generation_source_ordering", width = 6.5, height = 4.2)
 
 # -----------------------------
 # 13. Write compact output workbook
@@ -906,12 +1391,21 @@ save_figure(fig_prompt_attribute_contrast, "rq3_prompt_attribute_contrast", widt
 workbook_tables <- list(
   data_overview = data_overview,
   prompt_metadata_check = prompt_metadata_check,
-  distribution_by_model_language = metric_distribution_by_model_language,
+  dist_model_language = metric_distribution_by_model_language,
   correlation_stability = correlation_stability,
-  language_sensitivity_by_model = language_shift_by_model,
+  lang_shift_by_model = language_shift_by_model,
+  lang_shift_direction = table_language_shift_direction_for_paper,
+  lang_shift_summary = language_shift_direction_summary,
+  source_pair_diff = source_pairwise_differences,
+  source_pair_direction = table_source_pair_direction_for_paper,
+  source_pair_summary = table_source_pair_stability_summary_for_paper,
+  source_tendency_tbl9 = table_source_tendency_stability_for_paper,
   model_ranking = model_ranking_summary,
   model_rank_stability = model_rank_stability,
-  prompt_attribute_contrast = table_prompt_attribute_contrast_for_paper
+  prompt_attribute_mean_z = table_prompt_attribute_for_paper,
+  prompt_attr_metric_z = table_prompt_attribute_metric_z_for_paper,
+  prompt_attr_metric_hetero = table_prompt_attribute_heterogeneity_for_paper,
+  prompt_attr_hetero_summary = table_prompt_attribute_heterogeneity_summary_for_paper
 )
 
 writexl::write_xlsx(workbook_tables, file.path(output_dir, "rq3_key_results.xlsx"))
@@ -940,24 +1434,34 @@ readme_text <- c(
   "## 工作簿工作表",
   "- data_overview：按数据集、生成来源和语言统计图像、提示词与随机种子覆盖情况。",
   "- prompt_metadata_check：提示词元数据匹配与覆盖检查。",
-  "- distribution_by_model_language：按数据集、生成来源、语言和指标汇总的分布统计。",
+  "- dist_model_language：按数据集、生成来源、语言和指标汇总的分布统计。",
   "- correlation_stability：Core360 与 Extended1440 之间的指标间相关结构稳定性。",
-  "- language_sensitivity_by_model：按数据集、生成来源和指标汇总的英文减中文配对差值。",
+  "- lang_shift_by_model：按数据集、生成来源和指标汇总的英文减中文配对差值，包含 Wilcoxon 检验和 BH 校正结果。",
+  "- lang_shift_direction：基于 BH 校正结果汇总的语言偏移方向与 Core360--Extended1440 稳定性。",
+  "- lang_shift_summary：语言偏移方向稳定性类别的数量汇总。",
+  "- source_pair_diff：按数据集、语言、指标和生成来源对汇总的配对差值，包含 Wilcoxon 检验和 BH 校正结果。",
+  "- source_pair_direction：基于 BH 校正结果汇总的生成来源配对方向与 Core360--Extended1440 稳定性。",
+  "- source_pair_summary：按语言和指标汇总的生成来源评分倾向稳定性类别计数。",
+  "- source_tendency_tbl9：适合正文使用的生成来源评分倾向稳定性表。Stable / 3 表示 3 个来源对中稳定延续的数量，Rev/Core/Ext/NS 汇总其他模式。",
   "- model_ranking：按数据集、提示词语言和指标得到的生成来源排序。",
   "- model_rank_stability：Core360 与 Extended1440 之间的生成来源排序稳定性。",
-  "- prompt_attribute_contrast：基于标准化多指标均值范围的提示词属性差异汇总表。",
+  "- prompt_attribute_mean_z：基于标准化多指标均值的属性层级描述性汇总，保留用于复核，不作为主结论。",
+  "- prompt_attr_metric_z：按提示属性层级和单个客观指标汇总的标准化指标均值。",
+  "- prompt_attr_metric_hetero：按数据集、提示属性和单个客观指标计算的属性层级异质性范围。",
+  "- prompt_attr_hetero_summary：按数据集和提示属性汇总的单指标异质性结果，用于补充性提示属性分析。",
   "",
   "## 图像文件",
   "- figures/rq3_model_metric_profiles.png/.pdf：按生成来源、数据集和语言展示标准化客观指标轮廓。",
-  "- figures/rq3_language_shift_heatmap.png/.pdf：按数据集、生成来源和指标展示英文减中文平均差值。",
+  "- figures/rq3_language_shift_heatmap.png/.pdf：按数据集、生成来源和指标展示英文减中文平均差值；该图保留原始量纲，用于同一指标内部解释。",
+  "- figures/rq3_language_shift_direction_stability.png/.pdf：基于 BH 校正结果展示 Core360 与 Extended1440 的语言偏移方向稳定性，适合作为正文语言偏移图。",
+  "- figures/rq3_generation_source_pair_direction_stability.png/.pdf：按语言、指标和生成来源对展示基于 BH 校正的来源差值方向稳定性，适合作为参考图。",
   "- figures/rq3_model_ranking_heatmap.png/.pdf：按指标、数据集和语言展示生成来源排序。",
   "- figures/rq3_metric_correlation_heatmap.png/.pdf：展示指标间 Spearman 相关结构。",
-  "- figures/rq3_prompt_attribute_contrast.png/.pdf：展示提示词属性对应的客观指标轮廓差异。",
   "",
   "## 论文使用方式",
-  "正文图表可优先使用 rq3_model_metric_profiles、rq3_language_shift_heatmap 和生成来源排序结果。",
-  "指标相关热力图和提示词属性差异图可根据篇幅放入附录。",
-  "提示词属性结果用于描述客观指标行为差异，不直接解释为主观感知质量差异。",
+  "正文图表可优先使用 rq3_language_shift_direction_stability、source_tendency_table9 以及 correlation_stability 对应结果表。",
+  "指标相关热力图可根据篇幅放入附录。提示属性分析建议使用工作簿中的 prompt_attr_heterogeneity_summary 表进行补充性描述，不再输出正文柱状图。",
+  "提示词属性结果用于描述客观指标行为异质性，不直接解释为主观感知质量差异，也不表示某类提示词更优。",
   ""
 )
 

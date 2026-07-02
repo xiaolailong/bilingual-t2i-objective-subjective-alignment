@@ -55,6 +55,19 @@ safe_read_excel <- function(path, sheet) {
   readxl::read_excel(path, sheet = sheet, .name_repair = "unique")
 }
 
+read_first_available_sheet <- function(path, candidate_sheets, purpose = "input") {
+  available_sheets <- readxl::excel_sheets(path)
+  matched_sheet <- candidate_sheets[candidate_sheets %in% available_sheets][1]
+  if (is.na(matched_sheet)) {
+    stop(
+      "No available sheet found for ", purpose, ". Tried: ",
+      paste(candidate_sheets, collapse = ", "),
+      ". Available sheets: ", paste(available_sheets, collapse = ", ")
+    )
+  }
+  safe_read_excel(path, matched_sheet)
+}
+
 standardize_metric_label <- function(x) {
   x <- as.character(x)
   dplyr::case_when(
@@ -105,20 +118,25 @@ score_tier <- function(x, high_cut = 66.7, moderate_cut = 33.3) {
   )
 }
 
-plot_theme_sci <- function(base_size = 12) {
-  theme_minimal(base_size = base_size) +
+plot_theme_sci <- function(base_size = 10) {
+  theme_minimal(base_size = base_size, base_family = "serif") +
     theme(
-      panel.grid.minor = element_blank(),
-      panel.grid.major = element_line(color = "#E6E6E6", linewidth = 0.25),
-      plot.title = element_text(face = "bold"),
-      legend.title = element_text(face = "bold"),
-      axis.text = element_text(color = "#333333")
+      panel.grid = element_blank(),
+      axis.line = element_line(color = "#333333", linewidth = 0.25),
+      axis.ticks = element_line(color = "#333333", linewidth = 0.25),
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 10.5, margin = margin(b = 6)),
+      plot.title.position = "plot",
+      legend.title = element_text(face = "bold", size = 8.5),
+      legend.text = element_text(size = 8),
+      axis.title = element_text(size = 9.5),
+      axis.text = element_text(color = "#333333", size = 8.5),
+      strip.text = element_text(face = "bold", size = 8.5)
     )
 }
 
 metric_use_tier_palette <- c("High" = "#1B9E77", "Moderate" = "#4C78A8", "Low" = "#D95F02")
 score_heatmap_palette <- c("#F7FBFF", "#C6DBEF", "#6BAED6", "#2171B5", "#08306B")
-resource_palette <- c("Median seconds per image" = "#4C78A8", "Max GPU memory (GB)" = "#E45756")
+resource_palette <- c("Median scoring time (s/image)" = "#4C78A8", "Peak GPU memory usage (GB)" = "#E45756")
 
 # -----------------------------------------------------------------------------
 # Input files
@@ -175,123 +193,93 @@ combined_prediction <- safe_read_excel(rq1_file, "paper_table_combined_predictio
 # -----------------------------------------------------------------------------
 # RQ3: extended prompt-space stability evidence
 # -----------------------------------------------------------------------------
-correlation_stability <- safe_read_excel(rq3_file, "correlation_stability")
-model_rank_stability <- safe_read_excel(rq3_file, "model_rank_stability") %>%
+correlation_stability <- read_first_available_sheet(
+  rq3_file,
+  c("correlation_stability"),
+  purpose = "RQ3 inter-metric stability"
+)
+
+# RQ3 was updated to use direction-based stability instead of raw mean-shift
+# differences or simple generation-source rankings. The extended-set stability
+# score used in RQ4 therefore combines two components:
+#   1) language-shift direction stability across the three generation sources;
+#   2) generation-source scoring-tendency stability across six source-pair
+#      comparisons (three source pairs under Chinese prompts and three under
+#      English prompts).
+
+language_direction_stability_raw <- read_first_available_sheet(
+  rq3_file,
+  c("lang_shift_direction", "language_shift_direction"),
+  purpose = "RQ3 language-shift direction stability"
+) %>%
   mutate(MetricLabel = standardize_metric_label(MetricLabel))
-normalize_dataset_label <- function(x) {
-  x <- as.character(x)
-  dplyr::case_when(
-    str_detect(x, regex("core", ignore_case = TRUE)) ~ "Core360",
-    str_detect(x, regex("extended", ignore_case = TRUE)) ~ "Extended1440",
-    TRUE ~ x
-  )
-}
 
-language_sensitivity <- safe_read_excel(rq3_file, "language_sensitivity_by_model")
-required_language_input_columns <- c("Dataset", "ModelShortName", "MeanShift")
-missing_language_input_columns <- setdiff(required_language_input_columns, names(language_sensitivity))
-if (length(missing_language_input_columns) > 0) {
+required_language_direction_columns <- c("MetricLabel", "StabilityClass")
+missing_language_direction_columns <- setdiff(required_language_direction_columns, names(language_direction_stability_raw))
+if (length(missing_language_direction_columns) > 0) {
   stop(
-    "Sheet 'language_sensitivity_by_model' is missing required columns: ",
-    paste(missing_language_input_columns, collapse = ", ")
+    "RQ3 language-shift direction table is missing required columns: ",
+    paste(missing_language_direction_columns, collapse = ", ")
   )
 }
-if (!"MetricLabel" %in% names(language_sensitivity) && "ObjectiveMetric" %in% names(language_sensitivity)) {
-  language_sensitivity$MetricLabel <- language_sensitivity$ObjectiveMetric
-}
-if (!"MetricLabel" %in% names(language_sensitivity)) {
-  stop("Sheet 'language_sensitivity_by_model' must contain either 'MetricLabel' or 'ObjectiveMetric'.")
-}
-language_sensitivity <- language_sensitivity %>%
-  mutate(
-    Dataset = normalize_dataset_label(Dataset),
-    ModelShortName = standardize_model_name(ModelShortName),
-    MetricLabel = standardize_metric_label(MetricLabel)
-  )
 
-metric_rank_stability <- model_rank_stability %>%
+language_direction_stability <- language_direction_stability_raw %>%
   mutate(
-    RankSpearman_Core_vs_Extended = as.numeric(RankSpearman_Core_vs_Extended),
-    MeanRankAbsDiff = as.numeric(MeanRankAbsDiff),
-    RankChangedModels = as.numeric(RankChangedModels),
-    MeanScoreSpearman_Core_vs_Extended = as.numeric(MeanScoreSpearman_Core_vs_Extended)
+    IsStableLanguageDirection = str_detect(as.character(StabilityClass), "^Stable")
   ) %>%
   group_by(MetricLabel) %>%
   summarise(
-    MeanRankStability = mean(RankSpearman_Core_vs_Extended, na.rm = TRUE),
-    MeanScoreStability = mean(MeanScoreSpearman_Core_vs_Extended, na.rm = TRUE),
-    MeanRankAbsDiff = mean(MeanRankAbsDiff, na.rm = TRUE),
-    TotalRankChangedModels = sum(RankChangedModels, na.rm = TRUE),
+    LanguageStableCount = sum(IsStableLanguageDirection, na.rm = TRUE),
+    LanguageConditionCount = dplyr::n(),
+    LanguageShiftDirectionScore = 100 * LanguageStableCount / LanguageConditionCount,
     .groups = "drop"
   ) %>%
   mutate(
-    RankStabilityScore = pmax(0, MeanRankStability) * 100,
-    RankStabilityTier = score_tier(RankStabilityScore, high_cut = 80, moderate_cut = 50)
+    LanguageShiftDirectionTier = score_tier(LanguageShiftDirectionScore, high_cut = 75, moderate_cut = 50)
   )
 
-language_shift_wide <- language_sensitivity %>%
+source_pair_direction_raw <- read_first_available_sheet(
+  rq3_file,
+  c("source_pair_direction"),
+  purpose = "RQ3 generation-source scoring-tendency stability"
+) %>%
+  mutate(MetricLabel = standardize_metric_label(MetricLabel))
+
+required_source_direction_columns <- c("MetricLabel", "StabilityClass")
+missing_source_direction_columns <- setdiff(required_source_direction_columns, names(source_pair_direction_raw))
+if (length(missing_source_direction_columns) > 0) {
+  stop(
+    "RQ3 source-pair direction table is missing required columns: ",
+    paste(missing_source_direction_columns, collapse = ", ")
+  )
+}
+
+source_tendency_stability <- source_pair_direction_raw %>%
   mutate(
-    MeanShift = as.numeric(MeanShift),
-    ModelShortName = standardize_model_name(ModelShortName)
+    IsStableSourceTendency = StabilityClass == "Stable same direction"
   ) %>%
-  select(MetricLabel, ModelShortName, Dataset, MeanShift) %>%
-  group_by(MetricLabel, ModelShortName, Dataset) %>%
-  summarise(MeanShift = mean(MeanShift, na.rm = TRUE), .groups = "drop") %>%
-  pivot_wider(
-    id_cols = c(MetricLabel, ModelShortName),
-    names_from = Dataset,
-    values_from = MeanShift
-  )
-
-required_language_columns <- c("MetricLabel", "ModelShortName", "Core360", "Extended1440")
-missing_language_columns <- setdiff(required_language_columns, names(language_shift_wide))
-if (length(missing_language_columns) > 0) {
-  stop(
-    "RQ3 language sensitivity data cannot be aligned. Missing columns after pivot_wider: ",
-    paste(missing_language_columns, collapse = ", "),
-    ". Check Dataset values in sheet 'language_sensitivity_by_model'."
-  )
-}
-
-language_shift_pair_check <- language_shift_wide %>%
-  mutate(HasCompletePair = stats::complete.cases(Core360, Extended1440)) %>%
   group_by(MetricLabel) %>%
   summarise(
-    CompleteShiftPairCount = sum(HasCompletePair),
-    MissingPairRows = sum(!HasCompletePair),
+    SourceStableCount = sum(IsStableSourceTendency, na.rm = TRUE),
+    SourcePairConditionCount = dplyr::n(),
+    SourceScoringTendencyScore = 100 * SourceStableCount / SourcePairConditionCount,
     .groups = "drop"
-  )
-
-invalid_language_shift_metrics <- language_shift_pair_check %>%
-  filter(CompleteShiftPairCount < 3)
-
-if (nrow(invalid_language_shift_metrics) > 0) {
-  stop(
-    "RQ3 language sensitivity data have incomplete Core360-Extended1440 pairs for: ",
-    paste(invalid_language_shift_metrics$MetricLabel, collapse = ", "),
-    ". Each metric should have three complete model-level pairs."
-  )
-}
-
-language_shift_stability <- language_shift_wide %>%
-  group_by(MetricLabel) %>%
-  summarise(
-    CompleteShiftPairCount = sum(stats::complete.cases(Core360, Extended1440)),
-    CoreExtendedShiftSpearman = suppressWarnings(stats::cor(Core360, Extended1440, method = "spearman")),
-    MeanAbsCoreExtendedShiftDifference = mean(abs(Extended1440 - Core360)),
-    .groups = "drop"
-  )
-
-metric_stability <- metric_rank_stability %>%
-  left_join(language_shift_stability, by = "MetricLabel") %>%
+  ) %>%
   mutate(
-    LanguageShiftConsistencyScore = normalize_low(MeanAbsCoreExtendedShiftDifference),
+    SourceScoringTendencyTier = score_tier(SourceScoringTendencyScore, high_cut = 75, moderate_cut = 50)
+  )
+
+metric_stability <- full_join(language_direction_stability, source_tendency_stability, by = "MetricLabel") %>%
+  mutate(
     ExtendedStabilityScore = rowMeans(
-      cbind(RankStabilityScore, LanguageShiftConsistencyScore),
+      cbind(LanguageShiftDirectionScore, SourceScoringTendencyScore),
       na.rm = TRUE
     ),
-    ExtendedStabilityTier = score_tier(ExtendedStabilityScore, high_cut = 75, moderate_cut = 50)
-  )
+    ExtendedStabilityTier = score_tier(ExtendedStabilityScore, high_cut = 75, moderate_cut = 50),
+    LanguageStableOf3 = paste0(LanguageStableCount, "/", LanguageConditionCount),
+    SourceStableOf6 = paste0(SourceStableCount, "/", SourcePairConditionCount)
+  ) %>%
+  arrange(desc(ExtendedStabilityScore), MetricLabel)
 
 # -----------------------------------------------------------------------------
 # Resource and scoring-cost evidence
@@ -475,7 +463,10 @@ metric_use_matrix <- metric_use_matrix_base %>%
   select(
     MetricLabel,
     HumanAlignmentTier, MeanSpearman, CompositeSpearman, HumanAlignmentScore,
-    ExtendedStabilityTier, MeanRankStability, MeanAbsCoreExtendedShiftDifference, ExtendedStabilityScore,
+    ExtendedStabilityTier,
+    LanguageStableOf3, LanguageShiftDirectionScore,
+    SourceStableOf6, SourceScoringTendencyScore,
+    ExtendedStabilityScore,
     MedianSecondsPerImage, ImagesPerMinuteMedian, GPUMemoryUsedMaxMB, ErrorRate,
     SpeedEfficiencyScore, ResourceEfficiencyScore, ReliabilityScore,
     DeploymentComplexityScore, DeploymentComplexityTier, DeploymentSimplicityScore,
@@ -499,6 +490,13 @@ scatter_plot_data <- metric_use_matrix %>%
 x_breaks_raw <- scales::breaks_log(n = 5)(range(scatter_plot_data$MedianSecondsPerImage, na.rm = TRUE))
 x_breaks_raw <- x_breaks_raw[x_breaks_raw > 0]
 x_breaks_log <- log10(x_breaks_raw)
+size_breaks_mb <- pretty(range(scatter_plot_data$GPUMemoryUsedMaxMB, na.rm = TRUE), n = 3)
+size_breaks_mb <- size_breaks_mb[size_breaks_mb > 0]
+if (length(size_breaks_mb) > 3) {
+  size_breaks_mb <- size_breaks_mb[c(1, ceiling(length(size_breaks_mb) / 2), length(size_breaks_mb))]
+}
+size_breaks_mb <- unique(size_breaks_mb)
+
 
 scatter_plot <- ggplot(
   scatter_plot_data,
@@ -521,7 +519,7 @@ scatter_plot <- ggplot(
     inherit.aes = FALSE,
     hjust = 0,
     vjust = 0.5,
-    size = 3.0,
+    size = 3.1,
     check_overlap = TRUE,
     show.legend = FALSE
   ) +
@@ -531,22 +529,57 @@ scatter_plot <- ggplot(
     expand = expansion(mult = c(0.08, 0.24))
   ) +
   scale_y_continuous(expand = expansion(mult = c(0.12, 0.12))) +
-  scale_size_continuous(name = "Max GPU memory (MB)", range = c(3, 10)) +
-  scale_color_manual(values = metric_use_tier_palette, drop = FALSE, name = "Metric-use class") +
+  scale_size_continuous(name = "Peak GPU memory usage (MB)", range = c(3, 8.5), breaks = size_breaks_mb) +
+  scale_color_manual(values = metric_use_tier_palette, drop = FALSE, name = "Practical applicability tier") +
   coord_cartesian(clip = "off") +
   labs(
     title = "Subjective alignment versus scoring cost",
-    x = "Median seconds per image (log scale)",
+    x = "Median scoring time (s/image; log scale)",
     y = "Mean Spearman correlation with subjective scores"
   ) +
-  plot_theme_sci(base_size = 12) +
+  guides(
+    color = guide_legend(
+      order = 1,
+      nrow = 1,
+      byrow = TRUE,
+      direction = "horizontal",
+      title.position = "left",
+      label.position = "right",
+      override.aes = list(size = 2.8)
+    ),
+    size = guide_legend(
+      order = 2,
+      nrow = 1,
+      byrow = TRUE,
+      direction = "horizontal",
+      title.position = "left",
+      label.position = "right"
+    )
+  ) +
+  plot_theme_sci(base_size = 11) +
   theme(
-    legend.position = "right",
-    plot.margin = margin(8, 36, 8, 8)
+    legend.position = "top",
+    legend.justification = "center",
+    legend.box = "vertical",
+    legend.direction = "horizontal",
+    legend.box.just = "center",
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    legend.key.width = unit(8, "pt"),
+    legend.title = element_text(size = 7.4),
+    legend.text = element_text(size = 7.0),
+    legend.spacing.x = unit(2, "pt"),
+    legend.spacing.y = unit(0, "pt"),
+    legend.box.spacing = unit(0.3, "pt"),
+    legend.margin = margin(0, 0, 0, 0),
+    axis.title = element_text(size = 10.5),
+    axis.text = element_text(size = 9.5),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 12.0, margin = margin(b = 4)),
+    plot.margin = margin(4, 8, 8, 8)
   )
 
-ggsave(file.path(figure_dir, "rq4_alignment_cost_scatter.png"), scatter_plot, width = 9.2, height = 5.5, dpi = 300, bg = "white")
-ggsave(file.path(figure_dir, "rq4_alignment_cost_scatter.pdf"), scatter_plot, width = 9.2, height = 5.5, bg = "white")
+ggsave(file.path(figure_dir, "rq4_alignment_cost_scatter.png"), scatter_plot, width = 5.8, height = 4.2, units = "in", dpi = 300, bg = "white")
+ggsave(file.path(figure_dir, "rq4_alignment_cost_scatter.pdf"), scatter_plot, width = 5.8, height = 4.2, units = "in", bg = "white")
 
 heatmap_vars <- metric_use_matrix %>%
   transmute(
@@ -572,25 +605,25 @@ heatmap_data <- heatmap_vars %>%
 
 heatmap_plot <- ggplot(heatmap_data, aes(x = Dimension, y = MetricLabel, fill = Score)) +
   geom_tile(color = "white") +
-  geom_text(aes(label = ifelse(is.na(Score), "NA", round(Score, 0))), size = 3) +
+  geom_text(aes(label = ifelse(is.na(Score), "NA", round(Score, 0))), size = 2.5) +
   scale_fill_gradientn(colours = score_heatmap_palette, limits = c(0, 100), na.value = "#E6E6E6") +
   labs(
-    title = "Metric-use profile for generated-image assessment",
+    title = "Practical applicability profile",
     x = NULL,
     y = NULL,
     fill = "Score"
   ) +
-  plot_theme_sci(base_size = 12) +
-  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+  plot_theme_sci(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 8))
 
-ggsave(file.path(figure_dir, "rq4_practical_applicability_heatmap.png"), heatmap_plot, width = 9, height = 5.5, dpi = 300)
-ggsave(file.path(figure_dir, "rq4_practical_applicability_heatmap.pdf"), heatmap_plot, width = 9, height = 5.5)
+ggsave(file.path(figure_dir, "rq4_practical_applicability_heatmap.png"), heatmap_plot, width = 6.5, height = 4.6, units = "in", dpi = 300, bg = "white")
+ggsave(file.path(figure_dir, "rq4_practical_applicability_heatmap.pdf"), heatmap_plot, width = 6.5, height = 4.6, units = "in", bg = "white")
 
 resource_plot_data <- resource_cost %>%
   transmute(
     MetricLabel,
-    `Median seconds per image` = MedianSecondsPerImage,
-    `Max GPU memory (GB)` = GPUMemoryUsedMaxMB / 1024
+    `Median scoring time (s/image)` = MedianSecondsPerImage,
+    `Peak GPU memory usage (GB)` = GPUMemoryUsedMaxMB / 1024
   ) %>%
   pivot_longer(-MetricLabel, names_to = "ResourceMeasure", values_to = "Value")
 
@@ -600,14 +633,14 @@ resource_plot <- ggplot(resource_plot_data, aes(x = reorder(MetricLabel, Value),
   facet_wrap(~ResourceMeasure, scales = "free_x") +
   scale_fill_manual(values = resource_palette, guide = "none") +
   labs(
-    title = "Scoring time and GPU memory use by objective metric",
+    title = "Scoring cost and GPU memory by objective metric",
     x = NULL,
     y = NULL
   ) +
-  plot_theme_sci(base_size = 12)
+  plot_theme_sci(base_size = 10)
 
-ggsave(file.path(figure_dir, "rq4_resource_cost_summary.png"), resource_plot, width = 9, height = 5.5, dpi = 300)
-ggsave(file.path(figure_dir, "rq4_resource_cost_summary.pdf"), resource_plot, width = 9, height = 5.5)
+ggsave(file.path(figure_dir, "rq4_resource_cost_summary.png"), resource_plot, width = 6.5, height = 4.6, units = "in", dpi = 300, bg = "white")
+ggsave(file.path(figure_dir, "rq4_resource_cost_summary.pdf"), resource_plot, width = 6.5, height = 4.6, units = "in", bg = "white")
 
 # -----------------------------------------------------------------------------
 # Output tables
@@ -643,6 +676,8 @@ output_workbook <- list(
   metric_subjective_alignment = human_alignment,
   combined_model_reference = combined_prediction,
   inter_metric_stability = correlation_stability,
+  language_direction_stability = language_direction_stability,
+  source_tendency_stability = source_tendency_stability,
   metric_stability = metric_stability,
   resource_cost = resource_cost,
   resource_by_dataset_metric = resource_by_dataset_metric,
@@ -663,7 +698,7 @@ readr::write_csv(rename_output_terms(resource_cost), file.path(rq4_output_dir, "
 readme_lines <- c(
   "# RQ4 计算可行性与指标使用分析输出说明",
   "",
-  "本目录保存 `rq4_practical_applicability_analysis.R` 的输出结果，用于汇总客观指标的主观一致性、扩展稳定性和计算成本。",
+  "本目录保存 `rq4_practical_applicability_analysis.R` 的输出结果，用于汇总客观指标的主观一致性、基于 RQ3 方向稳定性的扩展稳定性和计算成本。",
   "",
   "## 主要结果工作簿",
   "- `rq4_practical_applicability_results.xlsx`：RQ4 主要结果工作簿。",
@@ -671,7 +706,7 @@ readme_lines <- c(
   "  - `metric_subjective_alignment`：来自 RQ1 Spearman 相关的主观—客观一致性证据。",
   "  - `combined_model_reference`：来自 RQ1 的七指标联合预测结果。",
   "  - `inter_metric_stability`：来自 RQ3 的核心—扩展指标间相关结构稳定性。",
-  "  - `metric_stability`：基于生成来源排序和语言差异一致性的指标级扩展稳定性。",
+  "  - `language_direction_stability`：基于 RQ3 语言偏移方向稳定性得到的指标级语言稳定性得分。\n  - `source_tendency_stability`：基于 RQ3 生成来源配对方向稳定性得到的指标级来源评分倾向稳定性得分。\n  - `metric_stability`：由语言偏移方向稳定性和生成来源评分倾向稳定性平均得到的指标级扩展稳定性。",
   "  - `resource_cost`：按指标汇总的评分耗时、吞吐量、内存、GPU、CPU 和错误记录。",
   "  - `resource_by_dataset_metric`：按提示词集合和指标汇总的资源成本。",
   "  - `deployment_complexity`：可选的实现复杂度评分表；若未提供则输出模板。",

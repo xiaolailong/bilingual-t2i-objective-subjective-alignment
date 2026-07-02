@@ -112,6 +112,27 @@ human_labels <- c(
   CompositeScore = "Composite score"
 )
 
+# Full generation-source labels used in figures.
+generation_source_levels <- c("Qwen-Image-2512", "Z-Image-Turbo", "SDXL-Turbo")
+model_full_label <- function(x) {
+  x0 <- stringr::str_trim(as.character(x))
+  x_low <- stringr::str_to_lower(x0)
+  dplyr::case_when(
+    stringr::str_detect(x_low, "qwen") ~ "Qwen-Image-2512",
+    stringr::str_detect(x_low, "z[\\s_-]*image|zimage|z-image|z_image") ~ "Z-Image-Turbo",
+    stringr::str_detect(x_low, "sdxl") ~ "SDXL-Turbo",
+    TRUE ~ x0
+  )
+}
+ordered_generation_source_levels <- function(x) {
+  ux <- unique(as.character(x))
+  c(generation_source_levels[generation_source_levels %in% ux], setdiff(sort(ux), generation_source_levels))
+}
+wrap_generation_source_labels <- function(x) {
+  as.character(x)
+}
+
+
 # Optional prompt-attribute columns. The script will use only columns that exist in the input file.
 optional_condition_candidates <- c(
   "PromptCategory", "PromptMainCategory", "MainCategory", "Category",
@@ -532,7 +553,7 @@ paper_table_internal_conflict <- internal_conflict_summary %>%
 # Only figures that directly support the current RQ2 Results section are saved.
 # Other diagnostic plots are not exported by default to keep the output directory concise.
 
-# Figure A: residual mismatch count by human dimension.
+# Figure A: residual mismatch count by subjective assessment.
 p1 <- mismatch_counts %>%
   filter(ResidualMismatchType != "Moderate/aligned") %>%
   mutate(
@@ -551,16 +572,28 @@ p1 <- mismatch_counts %>%
   geom_col(position = position_dodge(width = 0.8), width = 0.7) +
   scale_fill_manual(values = c("#4C78A8", "#E45756"), drop = FALSE) +
   labs(
-    title = "Residual-based mismatch counts by subjective dimension",
-    x = "Subjective assessment dimension",
+    title = "Residual mismatches by subjective assessment",
+    x = "Subjective assessment",
     y = "Number of mismatch cases",
     fill = "Mismatch type"
   ) +
-  theme_minimal(base_size = 12) +
-  theme(axis.text.x = element_text(angle = 25, hjust = 1))
+  theme_minimal(base_size = 10, base_family = "serif") +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "#333333", linewidth = 0.25),
+    axis.ticks = element_line(color = "#333333", linewidth = 0.25),
+    axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5, size = 8.5),
+    axis.text.y = element_text(size = 8.5),
+    axis.title = element_text(size = 9.5),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 10.5),
+    plot.title.position = "plot",
+    legend.title = element_text(face = "bold", size = 8.5),
+    legend.text = element_text(size = 8),
+    legend.position = "top"
+  )
 
-ggsave(file.path(figure_dir, "rq2_residual_mismatch_counts.png"), p1, width = 8, height = 5, dpi = 300, bg = "white")
-ggsave(file.path(figure_dir, "rq2_residual_mismatch_counts.pdf"), p1, width = 8, height = 5, bg = "white")
+ggsave(file.path(figure_dir, "rq2_residual_mismatch_counts.png"), p1, width = 6.5, height = 4.2, dpi = 300, bg = "white")
+ggsave(file.path(figure_dir, "rq2_residual_mismatch_counts.pdf"), p1, width = 6.5, height = 4.2, bg = "white")
 
 # Figure B: composite residual by model and language.
 # This is the main figure used in the RQ2 Results section.
@@ -577,7 +610,8 @@ p2_data <- cv_residuals %>%
       TRUE ~ LanguageRaw
     ),
     PlotLanguage = factor(PlotLanguage, levels = c("Chinese", "English")),
-    ModelShortName = factor(ModelShortName, levels = unique(ModelShortName))
+    ModelShortName = model_full_label(ModelShortName),
+    ModelShortName = factor(ModelShortName, levels = ordered_generation_source_levels(ModelShortName))
   ) %>%
   filter(!is.na(PlotLanguage))
 
@@ -619,22 +653,30 @@ p2 <- ggplot(
     drop = FALSE
   ) +
   labs(
-    title = "Composite-score residuals by generation source and prompt language",
+    title = "Composite-score residuals by source and language",
     x = "Generation source",
-    y = "Standardized residual\n(subjective - objective-predicted)",
+    y = "Standardized residual\n(subjective score minus predicted score)",
     fill = "Prompt language"
   ) +
-  theme_minimal(base_size = 12) +
+  theme_minimal(base_size = 10, base_family = "serif") +
   theme(
-    panel.grid.minor = element_blank(),
-    panel.grid.major = element_line(color = "#E6E6E6", linewidth = 0.25),
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "#333333", linewidth = 0.25),
+    axis.ticks = element_line(color = "#333333", linewidth = 0.25),
+    axis.text.x = element_text(size = 7.8, angle = 0, hjust = 0.5, vjust = 0.5),
+    axis.text.y = element_text(size = 8.5),
+    axis.title = element_text(size = 9.5),
     axis.title.y = element_text(margin = margin(r = 10)),
-    plot.margin = margin(8, 12, 8, 28),
-    legend.position = "top"
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 10.5),
+    plot.title.position = "plot",
+    plot.margin = margin(8, 12, 8, 18),
+    legend.position = "top",
+    legend.title = element_text(face = "bold", size = 8.5),
+    legend.text = element_text(size = 8)
   )
 
-ggsave(file.path(figure_dir, "rq2_composite_residual_by_model_language.png"), p2, width = 9.2, height = 5.3, dpi = 300, bg = "white")
-ggsave(file.path(figure_dir, "rq2_composite_residual_by_model_language.pdf"), p2, width = 9.2, height = 5.3, bg = "white")
+ggsave(file.path(figure_dir, "rq2_composite_residual_by_model_language.png"), p2, width = 6.5, height = 4.4, dpi = 300, bg = "white")
+ggsave(file.path(figure_dir, "rq2_composite_residual_by_model_language.pdf"), p2, width = 6.5, height = 4.4, bg = "white")
 
 # -----------------------------
 # 11. Compact output tables
@@ -646,7 +688,7 @@ data_overview <- tibble(
     "Original rows",
     "Complete rows used",
     "Objective metrics",
-    "Subjective-rating dimensions",
+    "Subjective assessments",
     "Condition variables used",
     "CV repeats",
     "CV folds",
@@ -770,10 +812,10 @@ if (clean_previous_outputs) {
 }
 
 # Re-save the two selected figures after cleanup.
-ggsave(file.path(figure_dir, "rq2_residual_mismatch_counts.png"), p1, width = 8, height = 5, dpi = 300, bg = "white")
-ggsave(file.path(figure_dir, "rq2_residual_mismatch_counts.pdf"), p1, width = 8, height = 5, bg = "white")
-ggsave(file.path(figure_dir, "rq2_composite_residual_by_model_language.png"), p2, width = 9.2, height = 5.3, dpi = 300, bg = "white")
-ggsave(file.path(figure_dir, "rq2_composite_residual_by_model_language.pdf"), p2, width = 9.2, height = 5.3, bg = "white")
+ggsave(file.path(figure_dir, "rq2_residual_mismatch_counts.png"), p1, width = 6.5, height = 4.2, dpi = 300, bg = "white")
+ggsave(file.path(figure_dir, "rq2_residual_mismatch_counts.pdf"), p1, width = 6.5, height = 4.2, bg = "white")
+ggsave(file.path(figure_dir, "rq2_composite_residual_by_model_language.png"), p2, width = 6.5, height = 4.4, dpi = 300, bg = "white")
+ggsave(file.path(figure_dir, "rq2_composite_residual_by_model_language.pdf"), p2, width = 6.5, height = 4.4, bg = "white")
 
 writexl::write_xlsx(
   purrr::map(list(
